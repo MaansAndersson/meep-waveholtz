@@ -1899,6 +1899,12 @@ public:
                 int L = 2, std::complex<double> *eigfreq = NULL, double eigtol = 1e-8,
                 int eigiters = 20);
 
+  // Tmp arguments for WaveHoltz solver:
+  bool solve_waveholtz_cw(double tol , int maxiters, std::complex<double> frequency, int L,
+                      std::complex<double> *eigfreq, double eigtol, int eigiters);
+  bool solve_waveholtz_cw(double tol = sizeof(realnum) == sizeof(float) ? 1e-5 : 1e-8, int maxiters = 100, int L = 2,
+                      std::complex<double> *eigfreq = NULL, double eigtol = 1e-8, int eigiters = 10);
+
   // sources.cpp:
   double last_source_time();
   void add_point_source(component c, double freq, double width, double peaktime, double cutoff,

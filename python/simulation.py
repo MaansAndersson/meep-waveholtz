@@ -3774,6 +3774,12 @@ class Simulation:
         self._evaluate_dft_objects()
         return self.fields.solve_cw(tol, maxiters, L)
 
+    def solve_waveholtz_cw(self, tol=1e-8, maxiters=1000, L=2):
+        if self.fields is None:
+            raise RuntimeError("Fields must be initialized before using solve_cw")
+        self._evaluate_dft_objects()
+        return self.fields.solve_waveholtz_cw(tol, maxiters, L)
+
     def solve_eigfreq(
         self, tol=1e-7, maxiters=100, guessfreq=None, cwtol=None, cwmaxiters=10000, L=10
     ):

@@ -265,4 +265,140 @@ bool fields::solve_cw(double tol, int maxiters, int L, complex<double> *eigfreq,
   return solve_cw(tol, maxiters, freq, L, eigfreq, eigtol, eigiters);
 }
 
+
+/* WaveHoltz
+ * helper functions and add/remove support for real and complex fields?
+ * make field_step sync in time or compensate for that in function call.
+ */
+
+// 
+static void axpy_fields_to_array(const fields &f, complex<realnum> *x, double scale) {
+  size_t ix = 0;
+  for (int i = 0; i < f.num_chunks; i++)
+    if (f.chunks[i]->is_mine()) FOR_COMPONENTS(c) {
+        if (is_D(c) || is_B(c)) {
+          realnum *fr, *fi;
+#define COPY_FROM_FIELD(fld)                                                                       \
+   if ((fr = f.chunks[i]->fld[0]) && (fi = f.chunks[i]->fld[1]))                                   \
+    LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx)                                                   \
+    x[ix] = x[ix++] + complex<double>(scale*fr[idx],scale*fi[idx]);
+          COPY_FROM_FIELD(f[c]);
+          COPY_FROM_FIELD(f_u[c]);
+          COPY_FROM_FIELD(f_cond[c]);
+          COPY_FROM_FIELD(f_bfast[c]);
+          component c2 = field_type_component(is_D(c) ? E_stuff : H_stuff, c);
+          COPY_FROM_FIELD(f_w[c2]);
+          if (f.chunks[i]->f_w[c2][0]) COPY_FROM_FIELD(f[c2]);
+#undef COPY_FROM_FIELD
+        }
+      }
+}
+
+
+static void axpy_array_to_fields(const complex<realnum> *x, fields &f, double scale, double scale2) {
+  size_t ix = 0;
+  for (int i = 0; i < f.num_chunks; i++)
+    if (f.chunks[i]->is_mine()) FOR_COMPONENTS(c) {
+        if (is_D(c) || is_B(c)) {
+          realnum *fr, *fi;
+#define COPY_TO_FIELD(fld)                                                                         \
+  if ((fr = f.chunks[i]->fld[0]) && (fi = f.chunks[i]->fld[1]))                                    \
+    LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {                                                 \
+      fr[idx] = fr[idx] - scale*real(x[ix]);                                                       \
+      fr[idx] = fr[idx] / scale2;                                                                  \
+      fi[idx] = fi[idx] - scale*imag(x[ix++]);                                                     \
+      fi[idx] = fi[idx] / scale2;                                                                  \
+    }
+          COPY_TO_FIELD(f[c]);
+          COPY_TO_FIELD(f_u[c]);
+          COPY_TO_FIELD(f_cond[c]);
+          COPY_TO_FIELD(f_bfast[c]);
+          component c2 = field_type_component(is_D(c) ? E_stuff : H_stuff, c);
+          COPY_TO_FIELD(f_w[c2]);
+          if (f.chunks[i]->f_w[c2][0]) COPY_TO_FIELD(f[c2]);
+#undef COPY_TO_FIELD
+        }
+      }
+
+  f.step_boundaries(D_stuff);
+  f.update_eh(E_stuff, true);
+  f.step_boundaries(E_stuff);
+
+  /* done in f.step before updating D:
+  f.step_boundaries(B_stuff);
+  f.update_eh(H_stuff);
+  f.step_boundaries(H_stuff); */
+}
+
+/* Solve for the CW (constant frequency) field response at the given
+   frequency to the sources (with amplitude given by the current sources
+   at the current time).
+
+   The solver uses the WaveHoltz algorithm described in <https>
+   this algorithm utilises the standard FDTD evolution in time.
+
+   */
+bool fields::solve_waveholtz_cw(double tol, int maxiters, complex<double> frequency, int L,
+                      complex<double> *eigfreq, double eigtol, int eigiters) {
+
+  //if (!is_real) meep::abort("solve_waveholtz_cw is incompatible with use_complex_fields()");
+  set_solve_cw_omega(2 * pi * frequency);
+  double frequency_real = 1.;
+  double period = 1.0/real(frequency_real);
+  step(); // step once to make sure everything is allocated
+
+  size_t N = 0; // size of linear system (on this processor, at least)
+  for (int i = 0; i < num_chunks; i++)
+    if (chunks[i]->is_mine()) {
+      FOR_COMPONENTS(c) {
+        if (chunks[i]->f[c][0] && (is_D(c) || is_B(c))) {
+          component c2 = field_type_component(is_D(c) ? E_stuff : H_stuff, c);
+          /* unknowns are just D and B in non-PML regions, but in PML
+             regions the E, U, W, and C fields are also unknowns (in
+             principle, we might be able to compute these extra fields
+             in frequency domain via scalinb by the appropriate s
+             factors, rather than storing them, but I had some
+             problems getting that working) */
+          N += 2 * chunks[i]->gv.nowned(c) *
+               (1 + (chunks[i]->f_u[c][0] != NULL) + (chunks[i]->f_w[c2][0] != NULL) * 2 +
+                (chunks[i]->f_cond[c][0] != NULL) + (chunks[i]->f_bfast[c][0] != NULL));
+        }
+      }
+    }
+
+  // Allocating solution array.
+  size_t nwork = 0; //(size_t)bicgstabL(L, N, 0, 0, 0, 0, tol, &iters, 0, true);
+  realnum *work = new realnum[nwork + 2 * N];
+  complex<realnum> *x = reinterpret_cast<complex<realnum> *>(work + nwork);
+
+  //integrator_fields_to_array(*this, x); // initial guess = initial fields
+  for (int iter = 0; iter < maxiters; iter++) {
+  // zero_fields(); // note that we've saved the fields in x above
+    axpy_fields_to_array(*this, x, 0.5*dt*(cos(frequency_real*time())-0.25)); // scaled vector addition
+    // time_set_to_zero();
+    while (time() < period) {
+
+      step(); // FDTD step
+      // calc_sources(time());
+      // step_source(B_stuff, true);
+      // step_boundaries(B_stuff);
+      // update_eh(H_stuff);
+      // calc_sources(time() + 0.5 * dt);
+      // step_source(D_stuff, true);
+      // step_boundaries(D_stuff);
+      // update_eh(E_stuff);
+
+      // Scale time back with iteration*period
+      axpy_fields_to_array(*this, x, dt*(cos(frequency_real*time())-0.25)); // scale vector addition
+    }
+  axpy_array_to_fields(x, *this,  0.5*dt*(cos(frequency_real*time())-0.25), 2*real(frequency_real)); // x =+ \alpha*x; x /= \beta*x
+  //scale_field(*this, 2*frequency);
+  //error_check(); // some sort of tolerance check.
+  }
+
+  return 0; // !ierr;
+}
+
+
+
 } // namespace meep
