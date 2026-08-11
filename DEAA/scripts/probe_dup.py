@@ -1,13 +1,14 @@
 """With PML, initialize_field visits some Yee points more than once.
 Since it accumulates (f += val), does that double-write the initial data?"""
 
+import pathlib
 import sys
 from collections import Counter
 
 import numpy as np
 import meep as mp
 
-sys.path.insert(0, "/Users/appelo/Desktop/MEEP_STUFF")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 
 def check(dpml):

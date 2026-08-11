@@ -12,6 +12,7 @@ Produces decay.png.
 """
 
 import math
+import pathlib
 import sys
 
 import matplotlib
@@ -20,7 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import meep as mp
 
-sys.path.insert(0, "/Users/appelo/Desktop/MEEP_STUFF")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from emwh.core import TM_FLUX_COMPONENTS, EMWaveHoltz, tune_courant
 from emwh.problems import OMEGA0, TM_COMPONENTS, pec_box_simulation, ring_simulation

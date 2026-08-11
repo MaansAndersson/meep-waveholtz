@@ -12,6 +12,7 @@ Writes notes/pec_error_contours.png.
 
 import math
 import os
+import pathlib
 import sys
 
 import matplotlib
@@ -20,7 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import meep as mp
 
-sys.path.insert(0, "/Users/appelo/Desktop/MEEP_STUFF")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from emwh.core import EMWaveHoltz
 from emwh.manufactured import (SHIFT, errors, exact_on_grid,

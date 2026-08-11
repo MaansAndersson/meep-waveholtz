@@ -10,7 +10,8 @@ iteration over a time-domain solver. Plain fixed point; no Krylov acceleration y
 
 `STATUS.md` is the working log: what is verified, with numbers, and what is open. **Read it first**
 — it also records earlier conclusions that turned out to be wrong and why, which is the fastest way
-to avoid repeating them. Not a git repository, so `STATUS.md` is the only history.
+to avoid repeating them. It predates this directory being checked into the `meep-waveholtz` repo and
+is still the only narrative history; git history for `DEAA/` starts at the import.
 
 ## Commands
 
@@ -21,7 +22,9 @@ conda activate meep                       # or use the interpreter directly:
 /Users/appelo/anaconda3/envs/meep/bin/python scripts/convergence_pec.py
 ```
 
-Run everything **from the repo root** — scripts write relative paths (`notes/…`).
+Run everything **from `DEAA/`** — scripts write relative paths (`notes/…`). Every entry point puts
+`DEAA/` on `sys.path` itself (`pathlib.Path(__file__).resolve().parents[1]`), so no `PYTHONPATH` is
+needed, but the cwd still has to be `DEAA/`.
 
 ```bash
 # tests: plain scripts with asserts and __main__ blocks. pytest is NOT installed.

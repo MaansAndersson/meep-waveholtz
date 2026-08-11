@@ -11,18 +11,21 @@ solve_cw normalises or phases its output.
 """
 
 import math
+import pathlib
 import sys
 
 import numpy as np
 import meep as mp
 
-sys.path.insert(0, "/Users/appelo/Desktop/MEEP_STUFF")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from emwh.core import EMWaveHoltz, inject_state, tune_courant
+from emwh.core import (EMWaveHoltz, TM_FLUX_COMPONENTS, inject_state,
+                       tune_courant)
 from emwh.gridmap import make_injector
 from emwh.problems import TM_COMPONENTS, pec_box_simulation, ring_simulation
 
-NAMES = {mp.Ez: "Ez", mp.Hx: "Hx", mp.Hy: "Hy"}
+NAMES = {mp.Ez: "Ez", mp.Hx: "Hx", mp.Hy: "Hy",
+         mp.Dz: "Dz", mp.Bx: "Bx", mp.By: "By"}
 
 
 def inject(sim, wh, nu):
@@ -100,7 +103,11 @@ def test_ring_periodicity(resolution=5, n_periods=5, tol=1e-9, maxiter=1500):
     courant, _, _ = tune_courant(omega, resolution, n_periods, 0.5)
     sim = ring_simulation(omega=omega, resolution=resolution, dpml=1.0,
                           courant=courant, forcing="cos")
-    wh = EMWaveHoltz(sim, omega, components=TM_COMPONENTS, n_periods=n_periods)
+    # The ring has eps = 3.4**2, so the state has to be the flux fields: an
+    # (Ez,Hx,Hy) state drops a factor of eps on every injection and diverges
+    # (61x per application, STATUS.md).
+    wh = EMWaveHoltz(sim, omega, components=TM_FLUX_COMPONENTS,
+                     n_periods=n_periods)
     nu, iters = wh.solve(tol=tol, maxiter=maxiter, verbose=False)
     print(f"  converged in {iters} iterations, rel {wh.history[-1]:.2e}")
     worst = check_periodicity(sim, wh, nu, "ring")

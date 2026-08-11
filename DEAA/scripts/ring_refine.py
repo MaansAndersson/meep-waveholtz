@@ -26,6 +26,7 @@ Writes notes/ring_refine.png and notes/ring_refine_data.txt.
 import argparse
 import math
 import os
+import pathlib
 import sys
 import time
 
@@ -35,7 +36,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import meep as mp
 
-sys.path.insert(0, "/Users/appelo/Desktop/MEEP_STUFF")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from emwh.core import TM_FLUX_COMPONENTS, EMWaveHoltz, inject_state, tune_courant
 from emwh.problems import HALF, OMEGA0, SOURCE_X, ring_simulation

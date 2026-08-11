@@ -4,12 +4,13 @@ Run this first; every later piece assumes these answers.
 """
 
 import math
+import pathlib
 import sys
 
 import numpy as np
 import meep as mp
 
-sys.path.insert(0, "/Users/appelo/Desktop/MEEP_STUFF")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 
 def probe_source_waveform():

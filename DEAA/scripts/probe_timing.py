@@ -23,12 +23,13 @@ Two checks.
 """
 
 import math
+import pathlib
 import sys
 
 import numpy as np
 import meep as mp
 
-sys.path.insert(0, "/Users/appelo/Desktop/MEEP_STUFF")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from emwh.core import EMWaveHoltz
 from emwh.manufactured import SHIFT, forcing, manufactured_simulation

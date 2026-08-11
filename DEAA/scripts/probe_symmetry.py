@@ -1,12 +1,13 @@
 """Where does the asymmetry of I - S live, and which inner product fixes it?"""
 
 import math
+import pathlib
 import sys
 
 import numpy as np
 import meep as mp
 
-sys.path.insert(0, "/Users/appelo/Desktop/MEEP_STUFF")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from tests.test_operator import build_operator
 

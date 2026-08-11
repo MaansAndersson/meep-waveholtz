@@ -10,13 +10,14 @@ rather than merely at discretization-error level.
 
 import argparse
 import math
+import pathlib
 import sys
 import time
 
 import numpy as np
 import meep as mp
 
-sys.path.insert(0, "/Users/appelo/Desktop/MEEP_STUFF")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from emwh.core import (TM_FLUX_COMPONENTS, EMWaveHoltz, inject_state,
                        tune_courant)

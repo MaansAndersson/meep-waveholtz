@@ -1,12 +1,13 @@
 """Ground truth: which Yee points does initialize_field visit, and do they
 match the shape of get_dft_array(..., yee_grid=True)?"""
 
+import pathlib
 import sys
 
 import numpy as np
 import meep as mp
 
-sys.path.insert(0, "/Users/appelo/Desktop/MEEP_STUFF")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 
 def force_dft(sim, dft):
