@@ -9,6 +9,11 @@ factor of eps on injection wherever the material is not vacuum.  E is recovered
 at the end by injecting the converged state and reading Ez, where MEEP applies
 E = D/eps.
 
+This script is also the test for MEEP's native C++ WaveHoltz solver
+(``fields::solve_waveholtz_cw`` in src/cw_fields.cpp): it is run on the same
+problem with complex fields and checked against both references (the
+EM-WaveHoltz implementation above and MEEP's FDFD ``solve_cw``).
+
 Writes notes/ring_compare.png.
 """
 
@@ -67,6 +72,32 @@ def solve_fdfd(omega, res, dpml, periods, tol, L):
     return ez, el
 
 
+def solve_meep_waveholtz(omega, res, dpml, periods, tol, maxiter, L=2):
+    """MEEP's native C++ WaveHoltz solver (fields::solve_waveholtz_cw in
+    src/cw_fields.cpp), run with complex fields.  Returns the complex Ez array,
+    the wall time and the convergence flag."""
+    courant, _, _ = tune_courant(omega, res, periods, 0.5)
+    sim = ring_simulation(omega=omega, resolution=res, dpml=dpml,
+                          courant=courant, forcing="cos", complex_fields=True)
+    sim.init_sim()
+    t0 = time.time()
+    ok = sim.solve_waveholtz_cw(tol, maxiter, L)
+    el = time.time() - t0
+    if not ok:
+        print("  !! solve_waveholtz_cw reported non-convergence")
+    ez = np.asarray(sim.get_array(component=mp.Ez, cmplx=True))
+    print(f"  MEEP WaveHoltz (solve\\_waveholtz\\_cw): {el:.1f} s, "
+          f"converged={ok}")
+    return ez, el, ok
+
+
+def complex_fit(a, b):
+    """Best-fit complex scale s with a ~ s*b (least squares)."""
+    num = np.sum(np.conj(b) * a)
+    den = np.sum(np.conj(b) * b)
+    return num / den if den else 0.0
+
+
 def panel(ax, X, Y, Z, title, vmax=None, cmap=DIVERGING):
     m = vmax if vmax is not None else np.abs(Z).max()
     lv = np.linspace(-m, m, 25)
@@ -106,6 +137,10 @@ def main():
     print("[2] MEEP FDFD")
     ez_cw, t_cw = solve_fdfd(omega, args.resolution, args.dpml, args.periods,
                              1e-8, 10)
+    print("[3] MEEP WaveHoltz (solve_waveholtz_cw)")
+    ez_mwh, t_mwh, ok_mwh = solve_meep_waveholtz(
+        omega, args.resolution, args.dpml, args.periods, args.tol,
+        args.maxiter)
 
     # cos-forcing converges to Re{E}; confirm against both parts rather than assume
     best = None
@@ -143,23 +178,84 @@ def main():
     rel_away = np.abs(D[away]).max() / np.abs(B).max()
     print(f"  excluding disks of radius {rad} about the two point sources: "
           f"max|diff| {np.abs(D[away]).max():.4e} ({rel_away:.3e} relative)")
-    return_info = (np.abs(D).max() / np.abs(B).max(), rel_away)
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5.2))
-    panel(axes[0], X, Y, A, f"EM-WaveHoltz  $\\Re E_z$\n{iters} iterations, "
-                            f"{t_wh:.1f} s", vmax)
-    panel(axes[1], X, Y, B, f"MEEP FDFD (solve\\_cw)  ${part}\\,E_z$\n"
-                            f"BiCGStab-10, {t_cw:.1f} s", vmax)
-    panel(axes[2], X, Y, D, "difference\n"
-                            f"max {np.abs(D).max()/np.abs(B).max():.1e} rel.; "
-                            f"{rel_away:.1e} away from the sources")
+    # ------------------------------------------------------------------
+    # test solve_waveholtz_cw (MEEP's native C++ WaveHoltz) against the
+    # complex FDFD reference, fitting a global complex scale (the fixed
+    # point carries a small uniform phase/amplitude offset from the
+    # resonant transient, as in the reference implementation)
+    # ------------------------------------------------------------------
+    Bm = ez_cw[np.ix_(keep, keep)]
+    s_mwh = complex_fit(ez_mwh[np.ix_(keep, keep)], Bm)
+    Dm = ez_mwh[np.ix_(keep, keep)] - s_mwh * Bm
+    rel_all_mwh = np.abs(Dm).max() / np.abs(Bm).max()
+    rel_away_mwh = np.abs(Dm[away]).max() / np.abs(Bm).max()
+    print(f"  MEEP WaveHoltz vs FDFD: complex fit scale "
+          f"{s_mwh.real:.5f}{s_mwh.imag:+.5f}i, "
+          f"max rel diff {rel_all_mwh:.3e} "
+          f"({rel_away_mwh:.3e} away from the sources)")
+
+    # the fit-corrected real part of MEEP WaveHoltz vs the (real) reference
+    # EM-WaveHoltz field; fit a real scale too -- the two WaveHoltz
+    # realizations carry slightly different fixed-point phases (and only a
+    # scalar fit is possible against a real reference)
+    Am = (s_mwh * ez_mwh[np.ix_(keep, keep)]).real
+    s_em = float(np.sum(A * Am) / np.sum(Am * Am))
+    Dm_e = s_em * Am - A
+    rel_away_emwh = np.abs(Dm_e[away]).max() / np.abs(A).max()
+    print(f"  MEEP WaveHoltz vs EM-WaveHoltz: max rel diff "
+          f"{np.abs(Dm_e).max() / np.abs(A).max():.3e} "
+          f"({rel_away_emwh:.3e} away from the sources)")
+
+    failures = []
+    if not ok_mwh:
+        failures.append(
+            f"solve_waveholtz_cw did not converge (tol {args.tol},"
+            f" maxiter {args.maxiter})")
+    if rel_away_mwh > 0.05:
+        failures.append(
+            f"solve_waveholtz_cw vs solve_cw: max rel diff {rel_away_mwh:.2e} "
+            "away from the sources exceeds 5%")
+    if failures:
+        print("test solve_waveholtz_cw: FAIL")
+        for f in failures:
+            print("  - " + f)
+    else:
+        print(f"test solve_waveholtz_cw: PASS (agrees with solve_cw to "
+              f"{rel_away_mwh:.2e} and with EM-WaveHoltz to "
+              f"{rel_away_emwh:.2e}, away from the sources)")
+    return_info = (np.abs(D).max() / np.abs(B).max(), rel_away, ok_mwh,
+                   rel_away_mwh)
+
+    fig, axes = plt.subplots(2, 3, figsize=(16, 10.2))
+    panel(axes[0, 0], X, Y, A, f"EM-WaveHoltz  $\\Re E_z$\n{iters} iterations, "
+                                f"{t_wh:.1f} s", vmax)
+    panel(axes[0, 1], X, Y, B, f"MEEP FDFD (solve\\_cw)  ${part}\\,E_z$\n"
+                                f"BiCGStab-10, {t_cw:.1f} s", vmax)
+    panel(axes[0, 2], X, Y, Am, f"MEEP WaveHoltz (solve\\_waveholtz\\_cw)\n"
+                                 f"$\\Re(s\\,E_z)$, {t_mwh:.1f} s", vmax)
+    panel(axes[1, 0], X, Y, D, "difference EM-WaveHoltz $-$ FDFD\n"
+                                f"max {np.abs(D).max()/np.abs(B).max():.1e} rel.; "
+                                f"{rel_away:.1e} away from the sources", vmax)
+    panel(axes[1, 1], X, Y, Dm.real, "difference MEEP WH $-$ FDFD\n"
+                                     f"max {rel_all_mwh:.1e} rel.; "
+                                     f"{rel_away_mwh:.1e} away from the sources",
+          vmax)
+    panel(axes[1, 2], X, Y, Dm_e, "difference MEEP WH $-$ EM-WH\n"
+                                   f"max {np.abs(Dm_e).max()/np.abs(A).max():.1e} "
+                                   f"rel.; {rel_away_emwh:.1e} away from the "
+                                   f"sources", vmax)
     fig.suptitle(
         f"Ring resonator with PML, $\\omega = {args.omega_factor}\\,\\omega_0$, "
         f"resolution {args.resolution} ($N={12*args.resolution}$ over $[-6,6]$), "
-        f"{args.periods} periods", fontsize=11)
+        f"{args.periods} periods: EM-WaveHoltz vs FDFD vs C++ WaveHoltz",
+        fontsize=11)
     fig.tight_layout(rect=[0, 0.01, 1, 0.95])
     fig.savefig("notes/ring_compare.png", dpi=140)
     print("wrote notes/ring_compare.png")
+
+    if failures:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
