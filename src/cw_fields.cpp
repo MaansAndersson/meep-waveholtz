@@ -18,6 +18,8 @@
 #include "meep_internals.hpp"
 #include "bicgstab.hpp"
 
+#include <vector>
+
 using namespace std;
 
 namespace meep {
@@ -270,22 +272,63 @@ bool fields::solve_cw(double tol, int maxiters, int L, complex<double> *eigfreq,
    solve_waveholtz_cw below.  The iteration state is the physical flux state
    (D, B) only; the PML auxiliary fields are rebuilt from zero at the start
    of every window, exactly as the reference implementation in DEAA/emwh
-   restarts the simulation before each window. */
+   restarts the simulation before each window.
 
+   The filter replicates MEEP's time-domain DFT (fields::update_dfts, as
+   accumulated for the dft_fields monitors used by the reference
+   implementation's DFTFilter): during each window every FDTD step n = 1..M
+   contributes weight dt with phase e^{+i omega t}, where D components are
+   sampled at the integer time t_n = n*dt and B components at t_n - dt/2
+   (MEEP's H/B fields live half a step behind E/D).  The frequency-omega
+   term is the cos projection and a frequency-zero term is the -1/4
+   DC-suppression term of EM-WaveHoltz.  With complex fields the filter
+   returns the full complex phasor (identical to solve_cw); with real fields
+   it returns its real part (the cos-forced response), exactly as the DEAA
+   reference implementation. */
+
+// x[ix] += scale * f[c] for all owned (D/B) points of all owned chunks
 static void axpy_fields_to_array_DB(const fields &f, complex<realnum> *x, complex<double> scale) {
   size_t ix = 0;
   for (int i = 0; i < f.num_chunks; i++)
     if (f.chunks[i]->is_mine()) FOR_COMPONENTS(c) {
         if (is_D(c) || is_B(c)) {
-          realnum *fr, *fi;
-#define COPY_FROM_FIELD(fld)                                                                       \
-   if ((fr = f.chunks[i]->fld[0]) && (fi = f.chunks[i]->fld[1]))                                   \
-    LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {                                                 \
-      x[ix] += complex<realnum>(scale * complex<double>(fr[idx], fi[idx]));                        \
-      ix++;                                                                                        \
-    }
-          COPY_FROM_FIELD(f[c]);
-#undef COPY_FROM_FIELD
+          realnum *fr = f.chunks[i]->f[c][0];
+          realnum *fi = f.chunks[i]->f[c][1];
+          if (!fr) continue;
+          if (fi)
+            LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {
+              complex<double> fc(fr[idx], fi[idx]);
+              x[ix++] += complex<realnum>(scale * fc);
+            }
+          else
+            LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx)
+            x[ix++] += complex<realnum>(scale * double(fr[idx]));
+        }
+      }
+}
+
+// x[ix] += dt * e^{i omega t_c} * f[c], t_c = tE for D, tB for B (MEEP's
+// update_dfts samples H/B one half step behind E/D)
+static void axpy_phased_fields_to_array_DB(const fields &f, complex<realnum> *x, double dt,
+                                           double omega, double tE, double tB) {
+  size_t ix = 0;
+  const complex<double> phaseE = dt * exp(complex<double>(0.0, omega * tE));
+  const complex<double> phaseB = dt * exp(complex<double>(0.0, omega * tB));
+  for (int i = 0; i < f.num_chunks; i++)
+    if (f.chunks[i]->is_mine()) FOR_COMPONENTS(c) {
+        if (is_D(c) || is_B(c)) {
+          realnum *fr = f.chunks[i]->f[c][0];
+          realnum *fi = f.chunks[i]->f[c][1];
+          if (!fr) continue;
+          const complex<double> phase = is_D(c) ? phaseE : phaseB;
+          if (fi)
+            LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {
+              complex<double> fc(fr[idx], fi[idx]);
+              x[ix++] += complex<realnum>(phase * fc);
+            }
+          else
+            LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx)
+            x[ix++] += complex<realnum>(phase * double(fr[idx]));
         }
       }
 }
@@ -295,15 +338,16 @@ static void array_DB_to_fields(const complex<realnum> *x, fields &f) {
   for (int i = 0; i < f.num_chunks; i++)
     if (f.chunks[i]->is_mine()) FOR_COMPONENTS(c) {
         if (is_D(c) || is_B(c)) {
-          realnum *fr, *fi;
-#define COPY_TO_FIELD(fld)                                                                         \
-  if ((fr = f.chunks[i]->fld[0]) && (fi = f.chunks[i]->fld[1]))                                    \
-    LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {                                                 \
-      fr[idx] = real(x[ix]);                                                                       \
-      fi[idx] = imag(x[ix++]);                                                                     \
-    }
-          COPY_TO_FIELD(f[c]);
-#undef COPY_TO_FIELD
+          realnum *fr = f.chunks[i]->f[c][0];
+          realnum *fi = f.chunks[i]->f[c][1];
+          if (!fr) continue;
+          if (fi)
+            LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {
+              fr[idx] = real(x[ix]);
+              fi[idx] = imag(x[ix++]);
+            }
+          else
+            LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) fr[idx] = real(x[ix++]);
         }
       }
   f.step_boundaries(D_stuff);
@@ -317,28 +361,27 @@ static void array_DB_to_fields(const complex<realnum> *x, fields &f) {
    periods of T = 1/Re(frequency), where K is the number of periods (default
    10, as in the reference; a single period is too coarse a filter) for which
    K*T is an integral number of timesteps, accumulating the trajectory with
-   the complex-exponential WaveHoltz kernel
+   MEEP's DFT kernels
 
-       (1/(K*T)) e^{+i*2*pi*Re(frequency)*t}
+       complex fields:  (1/(K*T)) int_0^{K*T} e^{+i omega t} u dt - (1/4) mean
+       real fields:     (2/(K*T)) int_0^{K*T} cos(omega t)       u dt - (1/2) mean
 
-   by the composite trapezoidal rule; the accumulated state is fed back as
-   the initial data of the next window.  The fixed point of this affine
-   iteration is the complex amplitude of the time-harmonic response.  (The
-   complex kernel is needed with complex fields: the real cosine kernel
-   would also project the conjugate e^{+i omega t} homogeneous mode with
-   multiplier one, leaving a spurious component that never decays.)  The
+   at every FDTD step (rectangle quadrature, D at integer and B at
+   half-integer times, exactly as the reference implementation's DFTFilter).
+   The accumulated state is fed back as the initial data of the next window;
+   the fixed point of this affine iteration is the time-harmonic response --
+   with complex fields the full complex phasor, identical to solve_cw; with
+   real fields its cos-projection (matching the DEAA EM-WaveHoltz).  The
    iteration state is the physical flux state (D, B) only -- the PML
    auxiliary fields are rebuilt from zero at the start of every window, as
-   in the reference implementation -- so the method is exactly the
-   EM-WaveHoltz iteration of DEAA/emwh.
+   in the reference implementation.  The -1/4 term suppresses the DC
+   component; the complex kernel additionally kills the conjugate e^{+i omega
+   t} homogeneous mode.
 
-   Notes: complex fields are required (use_real_fields unsupported, like
-   solve_cw), and the sources must be a pure sinusoid (e.g.
-   ContinuousSource with width=0) so that the forcing is exactly
-   time-harmonic.
-
-   Iterates until the state stops changing by < tol relative to its first
-   change, or until maxiters windows; returns true iff converged. */
+   Sources must be a pure sinusoid (e.g. ContinuousSource with width=0) so
+   that the forcing is exactly time-harmonic.  Iterates until the state stops
+   changing by < tol relative to its first change, or until maxiters
+   windows; returns true iff converged. */
 
 /* as solve_waveholtz_cw, but infers frequency from sources */
 bool fields::solve_waveholtz_cw(double tol, int maxiters, int L, complex<double> *eigfreq,
@@ -360,7 +403,6 @@ bool fields::solve_waveholtz_cw(double tol, int maxiters, complex<double> freque
   (void)eigfreq; // eigenfrequency estimation is not implemented for WaveHoltz
   (void)eigtol;
   (void)eigiters;
-  if (is_real) meep::abort("solve_waveholtz_cw is incompatible with use_real_fields()");
   if (L < 1) meep::abort("solve_waveholtz_cw called with L = %d < 1", L);
 
   const double freq = real(frequency);
@@ -373,99 +415,260 @@ bool fields::solve_waveholtz_cw(double tol, int maxiters, complex<double> freque
   const int tsave = t;
   step(); // step once to make sure everything is allocated
 
-  /* number of real unknowns: the physical (D, B) state on this processor */
-  size_t N = 0;
+  /* number of unknowns: one (complex) amplitude per owned (D/B) point */
+  size_t n = 0;
   for (int i = 0; i < num_chunks; i++)
     if (chunks[i]->is_mine()) {
       FOR_COMPONENTS(c) {
         if (chunks[i]->f[c][0] && (is_D(c) || is_B(c))) {
-          N += 2 * chunks[i]->gv.nowned(c);
+          n += chunks[i]->gv.nowned(c);
         }
       }
     }
-  const size_t n = N / 2; // number of complex unknowns
 
   /* the window must contain an integral number of timesteps, otherwise the
-     trapezoidal quadrature does not give multiplier exactly one on the
-     forced harmonic.  A single period is too coarse a filter: modes at
-     frequencies within a fraction of omega of the drive leak into the fixed
-     point, so prefer the reference implementation's 10-period window, and
-     fall back to the largest integral window of at most one period below
-     (or above) that. */
+     DFT does not give multiplier exactly one on the forced harmonic.  A
+     single period is too coarse a filter: modes at frequencies within a
+     fraction of omega of the drive leak into the fixed point, so prefer the
+     reference implementation's 10-period window, and fall back to the
+     largest integral window of at most one period below (or above) that. */
   int M = 0, K = 0;
   for (int Ktry = 10; Ktry >= 1 && !K; --Ktry) {
     const double M_d = Ktry * T / dt;
     const int M_try = (int)round(M_d);
     if (fabs(M_d - M_try) <= 1e-6 * std::max(1.0, M_d)) { K = Ktry; M = M_try; }
   }
-  for (int Ktry = 11; Ktry <= 64 && !K; ++Ktry) {
+  for (int Ktry = 11; Ktry <= 256 && !K; ++Ktry) {
     const double M_d = Ktry * T / dt;
     const int M_try = (int)round(M_d);
     if (fabs(M_d - M_try) <= 1e-6 * std::max(1.0, M_d)) { K = Ktry; M = M_try; }
   }
   if (K == 0)
-    meep::abort("solve_waveholtz_cw: no integer number of periods K <= 64 makes the window "
+    meep::abort("solve_waveholtz_cw: no integer number of periods K <= 256 makes the window "
                 "K*T an integral number of timesteps (T/dt = %g); choose the Courant number "
                 "so that it is (e.g. with DEAA.emwh.tune_courant)",
                 T / dt);
 
-  complex<realnum> *x = new complex<realnum>[n > 0 ? n : 1]; // filtered state (new iterate)
-  complex<realnum> *y = new complex<realnum>[n > 0 ? n : 1]; // previous iterate
+  const double window = K * T; // length of the filter window (seconds)
+  complex<realnum> *v = new complex<realnum>[n > 0 ? n : 1];   // iterate / solution
+  complex<realnum> *vn = new complex<realnum>[n > 0 ? n : 1];  // window filter output Pi(v)
+  complex<realnum> *pi0 = new complex<realnum>[n > 0 ? n : 1]; // affine constant Pi(0)
+  complex<realnum> *ct = new complex<realnum>[n > 0 ? n : 1];  // e^{+i omega t} accumulator
+  complex<realnum> *ot = new complex<realnum>[n > 0 ? n : 1];  // frequency-zero accumulator
+
+  /* One WaveHoltz window: out = Pi(vin), the DFT filter of the trajectory
+     evolved from initial data vin (physical D/B only) with the sources
+     running.  The state arrays are per-rank (each lattice point owned by
+     exactly one chunk), so the window itself needs no communication. */
+  auto apply_window = [&](const complex<realnum> *vin, complex<realnum> *out) {
+    zero_fields();
+    array_DB_to_fields(vin, *this);
+    t = tsave;
+    memset(ct, 0, n * sizeof(complex<realnum>));
+    memset(ot, 0, n * sizeof(complex<realnum>));
+    for (int m = 1; m <= M; ++m) {
+      step();
+      const double tE = time();        // integer-time sample instant
+      const double tB = tE - 0.5 * dt; // H/B fields live half a step behind
+      axpy_phased_fields_to_array_DB(*this, ct, dt, omega, tE, tB);
+      axpy_fields_to_array_DB(*this, ot, dt); // frequency-zero term
+    }
+    if (is_real) // real fields: cos projection (DEAA reference filter)
+      for (size_t i = 0; i < n; ++i) {
+        const double re =
+            (2.0 / window) * std::real(ct[i]) - (0.5 / window) * std::real(ot[i]);
+        out[i] = complex<realnum>(realnum(re), 0);
+      }
+    else // complex fields: full phasor, identical to solve_cw
+      for (size_t i = 0; i < n; ++i)
+        out[i] =
+            complex<realnum>((1.0 / window) * ct[i] - (1.0 / (4.0 * window)) * ot[i]);
+  };
 
   zero_fields(); // initial guess v^0 = 0
   t = tsave;     // every window starts at the same phase
 
-  memset(y, 0, n * sizeof(complex<realnum>)); // y = v^0 = 0
-  double first_diff = 0.0;
+  memset(v, 0, n * sizeof(complex<realnum>));   // v = v^0 = 0
+  memset(pi0, 0, n * sizeof(complex<realnum>));
+  apply_window(v, pi0); // pi0 = Pi(0): the affine constant (one window)
+
   bool converged = false;
   int iters = 0;
-  while (iters < maxiters && !converged) {
-    ++iters;
-    for (size_t i = 0; i < n; ++i)
-      x[i] = 0;
-
-    /* composite trapezoidal rule for the complex-exponential filter
-       (1/(K*T)) int_0^{K*T} e^{+i omega t} u dt.  With complex fields the real
-       cosine kernel would not only project the driven e^{-i omega t} mode but
-       also the conjugate e^{+i omega t} homogeneous mode with multiplier one, so
-       a spurious component would never decay; the complex kernel projects only
-       the driven mode.  Sampled at t = 0 (weight 1/2), t = dt..K*T-dt (weight 1)
-       and t = K*T (weight 1/2). */
-    t = tsave;
-    double cw = cos(omega * time()), sw = sin(omega * time());
-    complex<double> w = 0.5 * dt * complex<double>(cw, sw);
-    axpy_fields_to_array_DB(*this, x, w);
-    for (int m = 1; m <= M; ++m) {
-      step();
-      cw = cos(omega * time());
-      sw = sin(omega * time());
-      w = dt * (m == M ? 0.5 : 1.0) * complex<double>(cw, sw);
-      axpy_fields_to_array_DB(*this, x, w);
-    }
-
-    double diff = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-      x[i] *= (realnum)(1.0 / (K * T)); // apply the filter prefactor
-      const double dre = real(x[i] - y[i]), dim = imag(x[i] - y[i]);
-      diff += dre * dre + dim * dim;
-    }
-    diff = sqrt(sum_to_all(diff));
-    if (first_diff == 0.0) first_diff = diff;
-    const double rel = diff / std::max(first_diff, 1e-300);
-    if (verbosity > 0)
-      master_printf("WaveHoltz window %d: ||v^{k+1}-v^k|| = %g (%g relative)\n", iters, diff, rel);
-
-    /* install the filtered state as the next window's initial data: keep only
-       the physical (D, B) state and zero everything else (E/H and the PML
-       auxiliary fields), exactly as the reference implementation restarts the
-       simulation before every window */
-    for (size_t i = 0; i < n; ++i)
-      y[i] = x[i];
-    zero_fields();
-    array_DB_to_fields(x, *this);
-
-    converged = rel < tol;
+  if (n == 0) {
+    converged = true; // nothing to solve on this problem
   }
+  else if (L < 2) {
+    /* Plain fixed-point iteration v <- Pi(v) (used when the GMRES restart
+       dimension L < 2).  Convergence is measured on the iterate increment
+       ||v^{k+1}-v^k|| relative to the first one, exactly as the reference
+       implementation in DEAA/emwh does. */
+    double first_diff = 0.0;
+    while (iters < maxiters && !converged) {
+      ++iters;
+      apply_window(v, vn);
+      double diff = 0.0;
+      for (size_t i = 0; i < n; ++i) {
+        const double dre = std::real(vn[i] - v[i]), dim = std::imag(vn[i] - v[i]);
+        diff += dre * dre + dim * dim;
+      }
+      diff = sqrt(sum_to_all(diff));
+      if (first_diff == 0.0) first_diff = diff;
+      const double rel = diff / std::max(first_diff, 1e-300);
+      if (verbosity > 0 && iters % 10 == 0)
+        master_printf("WaveHoltz window %d: ||v^{k+1}-v^k|| = %g (%g relative)\n", iters, diff,
+                      rel);
+      memcpy(v, vn, n * sizeof(complex<realnum>));
+      converged = rel < tol;
+    }
+  }
+  else {
+    /* Restarted GMRES(restart) on the linear system
+
+           (I - S) v = Pi0,   with   A v = (I - S) v = v - Pi(v) + Pi0,
+
+       whose solution is the fixed point of the WaveHoltz iteration.  The
+       residual is r = Pi0 - A v = Pi(v) - v, i.e. exactly the fixed-point
+       increment, and GMRES minimizes it over the Krylov space
+       span{Pi0, A Pi0, A^2 Pi0, ...}.  Each matrix-vector product is one
+       WaveHoltz window (apply_window), so the cost per GMRES step equals
+       one fixed-point iteration, while the convergence is far better for
+       the slowly-decaying (near-resonant) modes.  All inner products and
+       norms are MPI reductions (sum_to_all), so the Krylov sequence and
+       the number of windows are identical on every rank.
+
+       The restart dimension is floored at 10: restarted GMRES with very
+       small restarts stalls on the non-normal filtered operator, and the
+       result must not depend on L (only the convergence speed may). */
+    const int restart = std::max(L, 10);
+    std::vector<complex<realnum> *> V(restart + 1);
+    for (int k = 0; k <= restart; ++k) V[k] = new complex<realnum>[n > 0 ? n : 1];
+    std::vector<std::vector<complex<double>>> H(restart + 1,
+                                                std::vector<complex<double>>(restart, 0.0));
+    std::vector<double> cs(restart, 0.0);              // real part of the givens
+    std::vector<complex<double>> sn(restart, 0.0);     // (complex) givens sine
+    std::vector<complex<double>> g(restart + 1, 0.0);  // accumulated rhs of the LS problem
+    std::vector<complex<double>> y(restart, 0.0);      // LS solution
+    complex<realnum> *w = V[restart];                  // scratch = A V[j]
+
+    // r0 = Pi0 - A*0 = Pi0
+    double beta = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+      const double re = std::real(pi0[i]), im = std::imag(pi0[i]);
+      beta += re * re + im * im;
+    }
+    beta = sqrt(sum_to_all(beta));
+    const double tol_abs = tol * beta; // relative tolerance on ||Pi(v)-v||
+
+    int nw = 0; // matrix-vector products (windows) used, pi0 not counted
+    bool done = (beta == 0.0); // zero forced response: v* = 0
+    if (!done) {
+      int cycle = 0;
+      while (!done && nw < maxiters) {
+        ++cycle;
+        // restart: V[0] = r / ||r||
+        const double binv = 1.0 / beta;
+        for (size_t i = 0; i < n; ++i) V[0][i] = complex<realnum>(pi0[i] * binv);
+        g[0] = beta;
+        for (int k = 1; k <= restart; ++k) g[k] = 0.0;
+
+        int mdone = 0; // Arnoldi steps completed in this cycle
+        for (int j = 0; j < restart && nw < maxiters; ++j) {
+          // w = A V[j] = V[j] - Pi(V[j]) + Pi0   (one window)
+          apply_window(V[j], vn);
+          ++nw;
+          for (size_t i = 0; i < n; ++i)
+            w[i] = complex<realnum>(complex<double>(V[j][i]) - complex<double>(vn[i]) +
+                                    complex<double>(pi0[i]));
+
+          // Arnoldi (modified Gram-Schmidt) against V[0..j]
+          for (int i = 0; i <= j; ++i) {
+            complex<double> h(0.0, 0.0);
+            for (size_t k = 0; k < n; ++k)
+              h += std::conj(complex<double>(V[i][k])) * complex<double>(w[k]);
+            h = sum_to_all(h);
+            H[i][j] = h;
+            for (size_t k = 0; k < n; ++k)
+              w[k] = complex<realnum>(complex<double>(w[k]) - h * complex<double>(V[i][k]));
+          }
+          double nrm = 0.0;
+          for (size_t k = 0; k < n; ++k) {
+            const double re = std::real(w[k]), im = std::imag(w[k]);
+            nrm += re * re + im * im;
+          }
+          H[j + 1][j] = sqrt(sum_to_all(nrm));
+          mdone = j + 1;
+          if (H[j + 1][j] == 0.0) break; // happy breakdown
+          for (size_t k = 0; k < n; ++k)
+            V[j + 1][k] = complex<realnum>(complex<double>(w[k]) * (1.0 / H[j + 1][j]));
+
+          // apply the previous rotations to the new Hessenberg column
+          for (int i = 0; i < j; ++i) {
+            const double c = cs[i];
+            const complex<double> s = sn[i];
+            const complex<double> a = H[i][j], b = H[i + 1][j];
+            H[i][j] = c * a + s * b;
+            H[i + 1][j] = -std::conj(s) * a + c * b;
+          }
+          // new complex givens rotation zeroing H[j+1][j]
+          const complex<double> a = H[j][j], b = H[j + 1][j];
+          const double aa = std::abs(a), bb = std::abs(b);
+          if (bb == 0.0) { cs[j] = 1.0; sn[j] = 0.0; }
+          else if (aa == 0.0) { cs[j] = 0.0; sn[j] = std::conj(b) / bb; }
+          else {
+            const double t = sqrt(aa * aa + bb * bb);
+            cs[j] = aa / t;
+            sn[j] = (a / aa) * std::conj(b) / t;
+          }
+          H[j][j] = cs[j] * a + sn[j] * b;
+          H[j + 1][j] = 0.0;
+          g[j + 1] = -std::conj(sn[j]) * g[j];
+          g[j] = cs[j] * g[j];
+          const double resid = std::abs(g[j + 1]);
+          if (verbosity > 1)
+            master_printf("WaveHoltz GMRES cycle %d, step %d: ||r|| = %g (%g rel.)\n", cycle,
+                          j + 1, resid, resid / beta);
+          if (resid <= tol_abs || nw >= maxiters) break;
+        }
+
+        // least-squares solve: H(0:mdone,0:mdone) y = g(0:mdone)
+        for (int i = mdone - 1; i >= 0; --i) {
+          complex<double> s = g[i];
+          for (int k = i + 1; k < mdone; ++k)
+            s -= H[i][k] * y[k];
+          y[i] = s / H[i][i];
+        }
+        // x += V[0:mdone] y
+        for (int j = 0; j < mdone; ++j)
+          for (size_t k = 0; k < n; ++k)
+            v[k] = complex<realnum>(complex<double>(v[k]) + y[j] * complex<double>(V[j][k]));
+
+        // true residual r = Pi(v) - v (one window), then restart
+        apply_window(v, vn);
+        ++nw;
+        for (size_t i = 0; i < n; ++i)
+          pi0[i] = complex<realnum>(complex<double>(vn[i]) - complex<double>(v[i]));
+        beta = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+          const double re = std::real(pi0[i]), im = std::imag(pi0[i]);
+          beta += re * re + im * im;
+        }
+        beta = sqrt(sum_to_all(beta));
+        if (verbosity > 0)
+          master_printf("WaveHoltz GMRES cycle %d: ||Pi(v)-v|| = %g (%g rel.), %d windows\n",
+                        cycle, beta, beta / std::max(tol_abs, 1e-300), nw);
+        done = (beta <= tol_abs);
+      }
+      converged = (beta <= tol_abs);
+      iters = nw + 1; // + the pi0 window
+    }
+    else
+      converged = true;
+    for (int k = 0; k <= restart; ++k) delete[] V[k];
+  }
+
+  /* install the solution as the fields' physical (D, B) state for readback */
+  zero_fields();
+  array_DB_to_fields(v, *this);
 
   if (verbosity > 0) {
     master_printf("Finished solve_waveholtz_cw after %d windows (~ %d timesteps).\n", iters,
@@ -478,10 +681,12 @@ bool fields::solve_waveholtz_cw(double tol, int maxiters, complex<double> freque
   update_eh(E_stuff);
   step_boundaries(E_stuff);
 
-  delete[] x;
-  delete[] y;
+  delete[] v;
+  delete[] vn;
+  delete[] pi0;
+  delete[] ct;
+  delete[] ot;
   t = tsave;
-  update_dfts();
 
   return converged;
 }

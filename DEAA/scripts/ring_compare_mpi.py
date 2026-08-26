@@ -45,7 +45,7 @@ def solve_fdfd(omega, res, dpml, periods, tol, L):
     return ez, el
 
 
-def solve_meep_waveholtz(omega, res, dpml, periods, tol, maxiter, L=2):
+def solve_meep_waveholtz(omega, res, dpml, periods, tol, maxiter, L=20):
     """MEEP's native C++ WaveHoltz solver (fields::solve_waveholtz_cw in
     src/cw_fields.cpp), run with complex fields.  Returns the complex Ez array,
     the wall time and the convergence flag."""
@@ -99,6 +99,7 @@ def main():
     ap.add_argument("--periods", type=int, default=10)
     ap.add_argument("--tol", type=float, default=1e-8)
     ap.add_argument("--maxiter", type=int, default=600)
+    ap.add_argument("--restart", type=int, default=20)
     args = ap.parse_args()
 
     omega = args.omega_factor * OMEGA0
@@ -110,7 +111,7 @@ def main():
     print("[2] MEEP WaveHoltz (solve_waveholtz_cw)")
     ez_mwh, t_mwh, ok_mwh = solve_meep_waveholtz(
         omega, args.resolution, args.dpml, args.periods, args.tol,
-        args.maxiter)
+        args.maxiter, args.restart)
 
     # plot only the physical domain [-HALF, HALF]^2, excluding the PML
     n = ez_cw.shape[0]
@@ -170,11 +171,11 @@ def main():
     panel(axes[1, 0], X, Y, Dm.real, "difference $\\Re$ (MEEP WH $-$ FDFD)\n"
                                      f"max {rel_all_mwh:.1e} rel.; "
                                      f"{rel_away_mwh:.1e} away from the sources",
-          vmax)
+          vmax=1e-1)
     panel(axes[1, 1], X, Y, Dm.imag, "difference $\\Im$ (MEEP WH $-$ FDFD)\n"
                                      f"max {rel_all_mwh:.1e} rel.; "
                                      f"{rel_away_mwh:.1e} away from the sources",
-          vmax)
+          vmax=1e-1)
     fig.suptitle(
         f"Ring resonator with PML, $\\omega = {args.omega_factor}\\,\\omega_0$, "
         f"resolution {args.resolution} ($N={12*args.resolution}$ over $[-6,6]$), "
