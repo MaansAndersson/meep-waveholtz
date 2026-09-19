@@ -534,8 +534,10 @@ void pi_steps(const double omega, const double Tend, const size_t Nt, fields &f,
       B_to_array(f, bxy_vector); // Originally did the integration in-place.
 
       dfilt = std::cos(t * omega) - 0.25;
+      // Trapezoid in D: 
+      const double wD = (it == Nt) ? 0.5 : 1.0;
       for (size_t i = 0; i < N_D; i++) {
-        dz_wh_vector[i] += dz_vector[i] * dfilt;
+        dz_wh_vector[i] += dz_vector[i] * dfilt * wD;
       }
       for (size_t i = 0; i < N_B; i++) {
         bxy_wh_vector[i] += bxy_vector[i] * dfilt;
@@ -610,7 +612,9 @@ int main(int argc, char **argv) {
 
   const double omega = 0.5; // std::sqrt(2.0) * PI;
   const double Tend = 2 * PI / omega;
-  const size_t Nt = Tend * res * 2;
+  /* Steps per period.  Round UP to ensure that Tend is covered.  The filter quadrature wants at 5 samples. */
+  const size_t Nt_cfl = (size_t)std::ceil(Tend * res * 2);
+  const size_t Nt = Nt_cfl < 5 ? 5 : Nt_cfl;
   const double dt_temp = Tend / (double)Nt;
   const double courant = 1 * dt_temp * res;
 
