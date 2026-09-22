@@ -38,8 +38,7 @@ RPATHS := $(patsubst %,-Wl$(COMMA)-rpath$(COMMA)%, \
             $(PREFIX)/lib $(MEEP_ROOT)/build_gsl/lib $(MEEP_ROOT)/build_fftw/lib \
             $(MEEP_ROOT)/build_mpb/lib $(MEEP_ROOT)/build_libctl/lib)
 
-TARGET := test_cavity
-TARGET2 := pi
+TARGET := pi_real
 OUTDIR ?= ../notes/cavity_c
 NT     ?= 1
 
@@ -47,10 +46,6 @@ NT     ?= 1
 all: $(TARGET)
 
 $(TARGET): $(TARGET).cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $< $(LDLIBS) $(RPATHS)
-
-pi: $(TARGET2) 
-$(TARGET2): $(TARGET2).cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $< $(LDLIBS) $(RPATHS)
 
 run: $(TARGET)
