@@ -38,15 +38,19 @@ RPATHS := $(patsubst %,-Wl$(COMMA)-rpath$(COMMA)%, \
             $(PREFIX)/lib $(MEEP_ROOT)/build_gsl/lib $(MEEP_ROOT)/build_fftw/lib \
             $(MEEP_ROOT)/build_mpb/lib $(MEEP_ROOT)/build_libctl/lib)
 
-TARGET := pi_real
+TARGET := wh
 OUTDIR ?= ../notes/cavity_c
 NT     ?= 1
 
 .PHONY: all run mpi clean
 all: $(TARGET)
 
-$(TARGET): $(TARGET).cpp
+$(TARGET): $(TARGET).cpp gmres.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $< $(LDLIBS) $(RPATHS)
+
+# Standalone GMRES/Poisson example: make gmres && mpirun -n 4 ./gmres [N] [m] [tol]
+gmres: gmres.cpp
+	$(CXX) $(CXXFLAGS) -DGMRES_MAIN $(INCLUDES) -o $@ $< $(LDLIBS) $(RPATHS)
 
 run: $(TARGET)
 	./$(TARGET) $(NT) $(OUTDIR)
@@ -55,5 +59,5 @@ mpi: $(TARGET)
 	mpirun -n 4 ./$(TARGET) $(NT) $(OUTDIR)
 
 clean:
-	rm -f $(TARGET)
-	rm -rf $(TARGET).dSYM
+	rm -f $(TARGET) gmres
+	rm -rf $(TARGET).dSYM gmres.dSYM

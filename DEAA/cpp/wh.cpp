@@ -11,6 +11,8 @@
 
 #include <meep.hpp>
 
+#include "gmres.cpp"
+
 #include <fstream>
 #include <iomanip>
 
@@ -43,7 +45,7 @@ static void fields_sum_to_array(const fields &f, realnum *x, const double scale_
         else if (is_B(c)) {
           realnum *fr;
 #define COPY_FROM_FIELD(fld)                                                                       \
-  if (fr = f.chunks[i]->fld[0]) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx)                       \
+  if ((fr = f.chunks[i]->fld[0])) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx)                       \
   x[ix++] += scale_B * fr[idx];
           COPY_FROM_FIELD(f[c]);
           COPY_FROM_FIELD(f_u[c]);
@@ -137,7 +139,7 @@ static void B_sum_to_array(const fields &f, realnum *x, const double scale) {
         if (is_B(c)) {
           realnum *fr;
 #define COPY_FROM_FIELD(fld)                                                                       \
-  if (fr = f.chunks[i]->fld[0]) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx)                       \
+  if ((fr = f.chunks[i]->fld[0])) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx)                       \
   x[ix++] += scale * fr[idx];
           COPY_FROM_FIELD(f[c]);
           COPY_FROM_FIELD(f_u[c]);
@@ -158,7 +160,7 @@ static void D_to_array(const fields &f, realnum *x) {
         if (is_D(c)) {
           realnum *fr;
 #define COPY_FROM_FIELD(fld)                                                                       \
-  if (fr = f.chunks[i]->fld[0]) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx)                       \
+  if ((fr = f.chunks[i]->fld[0])) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx)                       \
   x[ix++] = fr[idx];
           COPY_FROM_FIELD(f[c]);
           COPY_FROM_FIELD(f_u[c]);
@@ -179,7 +181,7 @@ static void B_to_array(const fields &f, realnum *x) {
         if (is_B(c)) {
           realnum *fr;
 #define COPY_FROM_FIELD(fld)                                                                       \
-  if (fr = f.chunks[i]->fld[0]) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx)                       \
+  if ((fr = f.chunks[i]->fld[0])) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx)                       \
   x[ix++] = fr[idx];
           COPY_FROM_FIELD(f[c]);
           COPY_FROM_FIELD(f_u[c]);
@@ -200,7 +202,7 @@ static void array_to_D(const realnum *x, fields &f) {
         if (is_D(c)) {
           realnum *fr;
 #define COPY_TO_FIELD(fld)                                                                         \
-  if (fr = f.chunks[i]->fld[0]) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {                     \
+  if ((fr = f.chunks[i]->fld[0])) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {                     \
       fr[idx] = x[ix++];                                                                           \
     }
           COPY_TO_FIELD(f[c]);
@@ -231,7 +233,7 @@ static void array_to_B(const realnum *x, fields &f) {
         if (is_B(c)) {
           realnum *fr;
 #define COPY_TO_FIELD(fld)                                                                         \
-  if (fr = f.chunks[i]->fld[0]) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {                     \
+  if ((fr = f.chunks[i]->fld[0])) LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {                     \
       fr[idx] = x[ix++];                                                                           \
     }
           COPY_TO_FIELD(f[c]);
@@ -532,8 +534,10 @@ int main(int argc, char **argv) {
   const double wx = 2.0, wy = 2.0;
   const double res = (argc > 1) ? atof(argv[1]) : 32; // * PI;
 
-  const double omega = 0.5; // std::sqrt(2.0) * PI;
-  const double Tend = 2 * PI / omega;
+  const double omega = (argc > 2) ? atof(argv[2]) : 1;
+  const int periods = (argc > 3) ? atof(argv[3]) : 1;
+
+  const double Tend = periods * 2 * PI / omega;
   const size_t Nt = Tend * res * 2;
   const double dt_temp = Tend / (double)Nt;
   const double courant = 1 * dt_temp * res;
@@ -638,23 +642,57 @@ int main(int argc, char **argv) {
   // pi_steps_in_place_old(omega, Tend, Nt, 100, f, d_wh_vector, N_D, b_wh_vector, N_B);
 
   master_printf("pi(x) \n");
+
+  const size_t N = N_D + N_B;
+  const int m = 10; // GMRES restart length
+  realnum *Pi0 = new realnum[N]();
+  realnum *x = new realnum[N](); // initial guess 0, overwritten with the solution
+
+  // Pi(x) = S x + Pi(0), so the fixed point solves (I - S) x = Pi(0). With the
+  // sources removed, Pi *is* S, so the operator is (I - S) x = x - Pi_nosrc(x).
+  f.zero_fields();
+  pi_steps_in_place(omega, Tend, Nt, 1, f, Pi0, N); // Pi0 = Pi(0), sources on
+  f.remove_sources();
   f.zero_fields();
 
-  const int N = N_D + N_B;
-  realnum *wh_vector = new realnum[N];
+  const double wt0 = meep::wall_time();
+  auto A = [&](const realnum *in, realnum *out) {
+    for (size_t i = 0; i < N; i++)
+      out[i] = in[i];
+    pi_steps_in_place(omega, Tend, Nt, 1, f, out, N); // out = S in, in place
+    for (size_t i = 0; i < N; i++)
+      out[i] = in[i] - out[i];
+  };
+  meep::gmres_result sol = meep::gmres(N, A, Pi0, x, m, 1e-9, (int)N);
+  const double wt1 = meep::wall_time();
+  master_printf("GMRES %s after %d iterations, |r|/|b| = %.3e, %.3f s\n",
+                sol.converged ? "converged" : "NOT converged", sol.iters, sol.relres, wt1 - wt0);
 
-  pi_steps_in_place(omega, Tend, Nt, 100, f, wh_vector, N);
+  // Max-norm error against the manufactured solution (D and B).
+  {
+    realnum *exact = new realnum[N];
+    get_full_solution(f, exact);
+    double emax = 0;
+    for (size_t i = 0; i < N; i++)
+      emax = std::max(emax, (double)std::abs(x[i] - exact[i]));
+    master_printf("GMRES max error (D,B) vs manufactured solution: %.3e\n", max_to_all(emax));
+    delete[] exact;
+  }
 
-  h5file *dz_file = f.open_h5file("dz", h5file::WRITE, 0, false);
-  f.output_hdf5(Dz, f.v, dz_file);
+  // The fields hold whatever A last applied Pi to; write the solution back first.
+  array_to_fields(x, f);
 
-  h5file *bx_file = f.open_h5file("bx", h5file::WRITE, 0, false);
-  f.output_hdf5(Bx, f.v, bx_file);
+  //h5file *dz_file = f.open_h5file("dz", h5file::WRITE, 0, false);
+  //f.output_hdf5(Dz, f.v, dz_file);
 
-  h5file *by_file = f.open_h5file("by", h5file::WRITE, 0, false);
-  f.output_hdf5(By, f.v, by_file);
+  //h5file *bx_file = f.open_h5file("bx", h5file::WRITE, 0, false);
+  //f.output_hdf5(Bx, f.v, bx_file);
+
+  //h5file *by_file = f.open_h5file("by", h5file::WRITE, 0, false);
+  //f.output_hdf5(By, f.v, by_file);
   // GOAL:
   // pi_steps(opts, f, x_wh, N_X)
+
 
   // f.zero_fields()
   // pi_steps(opts, f, x0, N_X);  x0 = PI0
