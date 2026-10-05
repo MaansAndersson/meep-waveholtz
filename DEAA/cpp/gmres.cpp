@@ -15,6 +15,9 @@
 // least-squares problem, restarted every m iterations.
 //   Y. Saad, M. H. Schultz, SIAM J. Sci. Stat. Comput. 7(3), 856-869 (1986).
 //   R. Barrett et al., Templates for the Solution of Linear Systems, SIAM (1994), Sec. 2.3.4.
+// fgmres is the flexible (right-preconditioned, preconditioner may vary per
+// iteration) variant:
+//   Y. Saad, SIAM J. Sci. Comput. 14(2), 461-469 (1993).
 
 #ifndef DEAA_GMRES_CPP
 #define DEAA_GMRES_CPP
@@ -70,15 +73,14 @@ struct gmres_result {
   bool converged;
 };
 
-// Solve A x = b starting from the initial guess in x (overwritten with the
-// solution). Converges when ||b - A x|| <= tol ||b||; m is the restart length,
-// maxit caps the total number of Arnoldi iterations. verbose prints the
-// residual at every restart on the master rank.
-template <typename T, typename Op>
-gmres_result gmres(size_t n, Op &&A, const T *b, T *x, int m, double tol, int maxit,
-                   bool verbose = true) {
-  using namespace gmres_detail;
+namespace gmres_detail {
+
+// Shared body of gmres (Flexible = false; M unused, no Z storage) and fgmres.
+template <bool Flexible, typename T, typename Op, typename Prec>
+gmres_result gmres_impl(size_t n, Op &&A, Prec &&M, const T *b, T *x, int m, double tol,
+                        int maxit, bool verbose, const char *name) {
   std::vector<std::vector<T> > V(m + 1, std::vector<T>(n));
+  std::vector<std::vector<T> > Z(Flexible ? m : 0, std::vector<T>(n)); // z_j = M_j(v_j)
   std::vector<T> w(n);
   std::vector<double> H((size_t)(m + 1) * m), cs(m), sn(m), g(m + 1), yv(m);
   auto Hij = [&](int i, int j) -> double & { return H[(size_t)j * (m + 1) + i]; };
@@ -96,7 +98,7 @@ gmres_result gmres(size_t n, Op &&A, const T *b, T *x, int m, double tol, int ma
     for (size_t k = 0; k < n; ++k)
       V[0][k] = b[k] - w[k];
     const double beta = norm2(n, V[0].data());
-    if (verbose) master_printf("gmres: iter %4d  |r|/|b| = %.3e  (restart)\n", it, beta / bnorm);
+    if (verbose) master_printf("%s: iter %4d  |r|/|b| = %.3e  (restart)\n", name, it, beta / bnorm);
     if (beta <= tol * bnorm) return {it, beta / bnorm, true};
     for (size_t k = 0; k < n; ++k)
       V[0][k] /= beta;
@@ -105,7 +107,12 @@ gmres_result gmres(size_t n, Op &&A, const T *b, T *x, int m, double tol, int ma
 
     int j = 0;
     for (; j < m && it < maxit; ++j, ++it) {
-      A(V[j].data(), w.data());
+      if constexpr (Flexible) {
+        M(V[j].data(), Z[j].data());
+        A(Z[j].data(), w.data());
+      }
+      else
+        A(V[j].data(), w.data());
       for (int i = 0; i <= j; ++i) { // modified Gram-Schmidt
         Hij(i, j) = dot(n, w.data(), V[i].data());
         xpay(n, w.data(), -Hij(i, j), V[i].data());
@@ -134,7 +141,8 @@ gmres_result gmres(size_t n, Op &&A, const T *b, T *x, int m, double tol, int ma
       }
     }
 
-    // Solve the j x j upper-triangular system H y = g and update x += V y.
+    // Solve the j x j upper-triangular system H y = g and update x += V y
+    // (x += Z y for the flexible variant).
     for (int i = j - 1; i >= 0; --i) {
       double t = g[i];
       for (int k = i + 1; k < j; ++k)
@@ -142,7 +150,7 @@ gmres_result gmres(size_t n, Op &&A, const T *b, T *x, int m, double tol, int ma
       yv[i] = t / Hij(i, i);
     }
     for (int i = 0; i < j; ++i)
-      xpay(n, x, yv[i], V[i].data());
+      xpay(n, x, yv[i], (Flexible ? Z[i] : V[i]).data());
 
     if (fabs(g[j]) <= tol * bnorm) break;
   }
@@ -153,6 +161,31 @@ gmres_result gmres(size_t n, Op &&A, const T *b, T *x, int m, double tol, int ma
     w[k] = b[k] - w[k];
   const double relres = norm2(n, w.data()) / bnorm;
   return {it, relres, relres <= tol * 1.01};
+}
+
+
+} // namespace gmres_detail
+
+// Solve A x = b starting from the initial guess in x (overwritten with the
+// solution). Converges when ||b - A x|| <= tol ||b||; m is the restart length,
+// maxit caps the total number of Arnoldi iterations. verbose prints the
+// residual at every restart on the master rank.
+template <typename T, typename Op>
+gmres_result gmres(size_t n, Op &&A, const T *b, T *x, int m, double tol, int maxit,
+                   bool verbose = true) {
+  auto none = [](const T *, T *) {};
+  return gmres_detail::gmres_impl<false>(n, A, none, b, x, m, tol, maxit, verbose, "gmres");
+}
+
+// Flexible GMRES: as gmres, but right-preconditioned by M(const T *in, T *out),
+// out ~= A^{-1} in, which may be nonlinear and may change on every call (e.g. an
+// inexact inner solve, or a stateful lambda). Stores m extra vectors z_j = M(v_j).
+// Residuals and the stopping test are on the true ||b - A x||. iters counts outer
+// iterations only; work done inside M is not included.
+template <typename T, typename Op, typename Prec>
+gmres_result fgmres(size_t n, Op &&A, Prec &&M, const T *b, T *x, int m, double tol, int maxit,
+                    bool verbose = true) {
+  return gmres_detail::gmres_impl<true>(n, A, M, b, x, m, tol, maxit, verbose, "fgmres");
 }
 
 } // namespace meep
@@ -172,7 +205,12 @@ gmres_result gmres(size_t n, Op &&A, const T *b, T *x, int m, double tol, int ma
 // meep::send in two odd/even phases per direction so pairs never serialize.
 // The solver is the generic meep::gmres above; this part only supplies the operator.
 //
-//   make gmres && mpirun -n 4 ./gmres [N] [restart] [tol]   (built with -DGMRES_MAIN)
+//   make gmres && mpirun -n 4 ./gmres [N] [restart] [tol] [inner]   (built with -DGMRES_MAIN)
+//
+// inner = 0: plain GMRES(restart). inner > 0: FGMRES(restart) preconditioned by
+// `inner` iterations of unrestarted inner GMRES (tol 1e-1) from a zero guess --
+// a nonlinear, iteration-dependent preconditioner. inner < 0: FGMRES with the
+// identity preconditioner, which must reproduce plain GMRES exactly.
 //
 // The discrete error vs the exact u should fall like h^2 (4x per doubling of N+1).
 
@@ -246,6 +284,7 @@ int main(int argc, char **argv) {
   const int N = argc > 1 ? atoi(argv[1]) : 63;
   const int m = argc > 2 ? atoi(argv[2]) : 30;
   const double tol = argc > 3 ? atof(argv[3]) : 1e-10;
+  const int inner = argc > 4 ? atoi(argv[4]) : 0;
 
   meep::slab s(N);
   const size_t n = s.n();
@@ -259,12 +298,29 @@ int main(int argc, char **argv) {
           exp(xx) * sin(pi * yy) * ((2 * pi * pi - 1) * sin(pi * xx) - 2 * pi * cos(pi * xx));
     }
 
-  meep::master_printf("Poisson %dx%d on %d rank(s), GMRES(%d), tol %.1e\n", N, N, s.nproc, m,
-                      tol);
+  meep::master_printf("Poisson %dx%d on %d rank(s), %s(%d), inner %d, tol %.1e\n", N, N, s.nproc,
+                      inner ? "FGMRES" : "GMRES", m, inner, tol);
   const double t0 = meep::wall_time();
   vector<double> pad((size_t)(s.ny + 2) * N, 0.0);
-  auto A = [&](const double *in, double *out) { meep::Ax(s, in, out, pad); };
-  meep::gmres_result res = meep::gmres(n, A, b.data(), x.data(), m, tol, 20 * N * N);
+  long napply = 0; // applications of A, inner solves and residuals included
+  auto A = [&](const double *in, double *out) {
+    ++napply;
+    meep::Ax(s, in, out, pad);
+  };
+  meep::gmres_result res;
+  if (inner > 0) {
+    auto M = [&](const double *in, double *out) {
+      fill(out, out + n, 0.0);
+      meep::gmres(n, A, in, out, inner, 1e-1, inner, false);
+    };
+    res = meep::fgmres(n, A, M, b.data(), x.data(), m, tol, 20 * N * N);
+  }
+  else if (inner < 0) {
+    auto M = [&](const double *in, double *out) { copy(in, in + n, out); };
+    res = meep::fgmres(n, A, M, b.data(), x.data(), m, tol, 20 * N * N);
+  }
+  else
+    res = meep::gmres(n, A, b.data(), x.data(), m, tol, 20 * N * N);
   const double t1 = meep::wall_time();
 
   // Discrete max-norm and grid-L2 errors against the exact solution.
@@ -277,8 +333,8 @@ int main(int argc, char **argv) {
   emax = meep::max_to_all(emax);
   e2 = sqrt(meep::sum_to_all(e2)) * s.h;
 
-  meep::master_printf("%s after %d iterations, true |r|/|b| = %.3e, %.3f s\n",
-                      res.converged ? "converged" : "NOT converged", res.iters, res.relres,
+  meep::master_printf("%s after %d iterations (%ld applications of A), true |r|/|b| = %.3e, %.3f s\n",
+                      res.converged ? "converged" : "NOT converged", res.iters, napply, res.relres,
                       t1 - t0);
   meep::master_printf("h = %.4e   max error = %.4e   L2 error = %.4e\n", s.h, emax, e2);
   return res.converged ? 0 : 1;

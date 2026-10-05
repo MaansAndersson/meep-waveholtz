@@ -51,14 +51,14 @@ def solve_meep_waveholtz(omega, res, dpml, periods, tol, maxiter, L=20):
     the wall time and the convergence flag."""
     courant, _, _ = tune_courant(omega, res, periods, 0.5)
     sim = ring_simulation(omega=omega, resolution=res, dpml=dpml,
-                          courant=courant, forcing="cos", complex_fields=True)
+                          courant=courant, forcing="cos", complex_fields=False)
     sim.init_sim()
     t0 = time.time()
     ok = sim.solve_waveholtz_cw(tol, maxiter, L)
     el = time.time() - t0
     if not ok:
         print("  !! solve_waveholtz_cw reported non-convergence")
-    ez = np.asarray(sim.get_array(component=mp.Ez, cmplx=True))
+    ez = np.asarray(sim.get_array(component=mp.Ez, cmplx=False))
     print(f"  MEEP WaveHoltz (solve\\_waveholtz\\_cw): {el:.1f} s, "
           f"converged={ok}")
     return ez, el, ok

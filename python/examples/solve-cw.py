@@ -60,7 +60,7 @@ sim = mp.Simulation(
     cell_size=cell_size,
     geometry=geometry,
     sources=src,
-    force_complex_fields=True,
+    force_complex_fields=False,
     symmetries=symmetries,
     boundary_layers=pml_layers,
 )
@@ -77,12 +77,12 @@ ez_dat = np.zeros(
         int(nonpml_vol.size.y * resolution) + 2,
         num_tols,
     ),
-    dtype=np.complex_,
+    dtype=np.complex128,
 )
 
 for i in range(num_tols):
     sim.init_sim()
-    sim.solve_cw(tols[i], maxiters, L)
+    sim.solve_waveholtz_cw(tols[i], maxiters, L)
     ez_dat[:, :, i] = sim.get_array(vol=nonpml_vol, component=mp.Ez)
 
 err_dat = np.zeros(num_tols - 1)
