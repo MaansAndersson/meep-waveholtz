@@ -159,7 +159,116 @@ Documents: `notes/pec_convergence.{tex,pdf}` (7 pp, both problems),
   initial data is stable there, so the earlier NaN was the eps != 1 state bug,
   not PML.
 
+## C++ driver: 3D cavity and the 7/8 source weight (2026-10-05)
+
+`cpp/wh.cpp` (GMRES on `(I − S)x = Π0`) gained a material table (`cases[]`,
+argument 4) and a 3D PEC box (argument 6, `dim` = 2 or 3). The 3D
+manufactured solution is `E = ẑ u`, `u = (x²−1)(y²−1)(z²−1)`, forced with
+`J = ω eps E − curl(μ⁻¹ curl E)/ω`, which adds Jx and Jy sources.
+
+**First 3D attempt did not converge, in every material case.** At res 8 → 16 → 32 the
+vacuum D error went 4.9e-2 → 7.1e-2 → 8.7e-2, *growing* under refinement. The error sat in the
+normal D components one half-cell inside the walls (Dx next to the x walls, Dz next to the
+z walls); Dx, exactly zero in the exact solution, reached 7% of max|Dz|. The exact
+solution was not even an approximate fixed point: `|(I − S)x_exact − Π0|` ≈ 0.08 against
+`|Π0|` ≈ 0.8, independent of h — a wrong forcing, not a conditioning problem. A z-independent
+3D solution (no Jx/Jy at all) failed the same way, which ruled out the new Jx/Jy formulas.
+
+**Cause: `add_volume_source` scales points half a cell inside the cell wall by 7/8.**
+MEEP treats a volume source as a continuous current density: the grid values are joined by
+linear interpolation, and each point is weighted by how much of its interpolation "hat"
+lies inside the source volume (`compute_boundary_weights`, `src/loop_in_chunks.cpp:257`;
+applied at `src/sources.cpp:273`). This is so the *integral* of the current is
+resolution independent. Along one direction, with the wall at z = 1 and the source volume
+`f.v` ending there:
+
+```
+                       /\        hat of the last Dz point: height 1, base 2h, area h
+                     /    \
+                   /        |\   <- beyond the wall: triangle of base h/2,
+                 /          |  \    height 1/2, area h/8
+        o-------o-------o---|---x---------
+     1-5h/2  1-3h/2  1-h/2  z=1  1+h/2: no grid point here (outside the cell)
+                            PEC wall, end of f.v
+```
+
+The hat has area h, and h/8 of it is outside, so the point gets weight 1 − 1/8 = **7/8**
+(MEEP's `e1 = 1 − (1 − w1)²/2` with `w1 = 1/2`). The other 1/8 belongs to a grid point
+outside the cell, which does not exist, so it is lost. The fraction is geometric, so it is
+7/8 **at every resolution**: J is 12.5% too small in a one-cell layer at the wall, an O(1)
+error that refinement never removes.
+
+It only hits components that sit at *half-integer* positions normal to a wall: Ez at the
+z walls, Ex at the x walls, Ey at the y walls. A component at *integer* positions has its
+last interior point at 1 − h, whose hat [1 − 2h, 1] is fully inside (weight 1); the point
+on the wall gets 1/2, but it is a tangential E on PEC and is zeroed every step. In 2D TM the
+only source, Ez, is at integer x and y, which is why 2D was never affected.
+
+Measured with a uniform Ez source, one step from zero, Dz relative to the interior: 0.8750
+at the outermost points at res 8 and at res 16 (scratch probe; 1.0000 everywhere else). Padding
+the source volume past the cell does not help — MEEP rejects it ("Source width > cell
+width") or wraps it around periodically.
+
+**Fix:** `Jz_src`, `Jx_src`, `Jy_src` in `wh.cpp` multiply the affected points by 8/7. They
+are used only in 3D with the manufactured forcing, and assume the walls are at ±1.
+
+After the fix (D: max error; B: max error relative to max|B_exact|):
+
+| 3D case | D, res 8 → 16 → 32 | order | B rel. | order | GMRES its (m = 10) |
+|---|---|---|---|---|---|
+| 0 vacuum | 4.6e-3 → 1.1e-3 → 2.8e-4 | 2.00, 2.01 | 3.6e-3 → 8.6e-4 → 2.1e-4 | 2.06, 2.04 | 16 |
+| 1 eps=2 | 4.3e-3 → 1.1e-3 → 2.7e-4 | 2.00, 2.01 | 2.6e-3 → 6.3e-4 → 1.5e-4 | 2.04, 2.04 | 28 |
+| 2 mu=2 | 2.1e-3 → 5.4e-4 → 1.3e-4 | 2.00, 2.01 | 2.6e-3 → 6.3e-4 → 1.5e-4 | 2.04, 2.04 | 28 |
+| 3 smooth eps, mu | 4.1e-3 → 1.0e-3 → 2.5e-4 | 2.03, 2.02 | 4.5e-3 → 1.1e-3 → 2.6e-4 | 2.06, 2.03 | 100 (cap) |
+| 4 eps jump | 5.9e-3 → 1.5e-3 → 3.8e-4 | 1.97, 2.00 | 4.6e-3 → 1.1e-3 → 2.8e-4 | 2.04, 2.03 | 97–100 |
+
+Cross-check: the z-independent 3D solution with the fix reproduces the 2D case-0 errors
+digit for digit (6.698e-3 / 2.982e-4 at res 8). The 2D path is bit-identical to before
+(`h5diff`, zero tolerance, all cases and PML).
+
+**Avoiding it by reformulating: `sol = 1` (argument 7).** The weight error is
+(1/8)·Jₙ(h/2) and stays local, so it is harmless iff each normal current has a *double*
+zero at its wall. With u a product of quadratics that cannot happen (Jx ∝ u_x, and
+d/dx (x²−1) ≠ 0 at x = ±1; PEC fixes all roots at ±1). `sol = 1` uses
+u = (x²−1)³ (y²−1)³ (z²−1)² instead (Jx ∝ (x²−1)², Jz ∝ (z²−1)²) with **plain, uncompensated
+sources**:
+
+| sol 1, D max error res 8 → 16 → 32 (order) | 2D | 3D |
+|---|---|---|
+| 0 vacuum | 1.8e-2 → 4.3e-3 → 1.1e-3 (2.10, 2.02) | 1.2e-2 → 2.9e-3 → 7.3e-4 (2.05, 2.00) |
+| 1 eps=2 | 2.1e-2 → 5.4e-3 → 1.4e-3 (1.96, 1.99) | 1.9e-2 → 4.9e-3 → 1.2e-3 (1.94, 1.98) |
+| 2 mu=2 | 1.1e-2 → 2.7e-3 → 6.8e-4 (1.96, 1.99) | 9.3e-3 → 2.4e-3 → 6.2e-4 (1.94, 1.98) |
+| 3 smooth eps, mu | 3.5e-2 → 8.7e-3 → 2.2e-3 (2.02, 2.00) | 3.0e-2 → 7.8e-3 → 2.0e-3 (1.96, 1.98) |
+| 4 eps jump | 4.4e-2 → 1.1e-2 → 2.7e-3 (2.03, 2.01) | 3.8e-2 → 9.4e-3 → 2.4e-3 (2.00, 1.99) |
+
+B (relative) is second order too, 1.78–2.04, approaching 2 at the finest pair. Errors are
+~2.5x those of `sol = 0` at equal resolution, the price of the degree-6 polynomial. The
+8/7 compensation remains in use for `sol = 0`; `sol = 0` output is bit-identical to before
+the addition (`h5diff`, 2D/3D/PML).
+
+Reading note: the *absolute* B error shows order 3 in both 2D and 3D. That is an artefact:
+the cos-filtered B is `B(−dt/2) ∝ sin(ω dt/2)/ω`, which is itself O(h) (max|B_exact| halves
+with h), so an O(h²) relative error looks O(h³) in absolute terms. Relative to its size,
+B is second order.
+
 ## Open
+
+* **GMRES tolerance 1e-13 is at the round-off floor in 3D.** With restart m = 10 (the table
+  above), 3D cases 3 and 4 hit the 100-iteration cap at |r|/|b| 1e-8 – 1e-13. With **m = 50
+  (now the default)** every case converges and the errors are unchanged to the printed digits:
+
+  | iterations, res 8 / 16 / 32 | 0 | 1 | 2 | 3 | 4 |
+  |---|---|---|---|---|---|
+  | 2D, m = 10 → 50 (res 16) | 14 → 14 | 15 → 14 | 15 → 14 | 31 → 19 | 33 → 20 |
+  | 3D, m = 50 | 16 / 16 / 44* | 20 / 19 / 52 | 20 / 19 / 45* | 31 / 30 / 30 | 32 / 31 / 53 |
+
+  \* reported "NOT converged": the Arnoldi estimate reached 1e-13, but `gmres.cpp` checks the
+  true residual afterwards (converged iff ≤ 1.01 tol), which came out at 1.09–1.17e-13 — the
+  usual recurrence/true-residual round-off gap. The res-32 jumps to 44–53 iterations are also
+  this floor, not the method: the errors still fall by exactly 4x. Use tol ~1e-10.
+* **The 7/8 compensation is specific to sources whose volume ends at a PEC wall.** Any other
+  MEEP volume source whose edge falls half a cell from a grid point gets the same weighting;
+  it is harmless for a source that vanishes there, as in 2D.
 
 * **Periodicity is inexact at 4.0e-4** (`tests/test_periodicity.py`), not
   round-off. Most likely the eq. (24) half-step back-out, whose stencil has no
