@@ -1592,6 +1592,7 @@ private:
 };
 
 enum boundary_condition { Periodic = 0, Metallic, Magnetic, None };
+enum linear_solver { BICGSTAB, GMRES }; // iterative solvers available to solve_wh
 enum time_sink {
   Connecting,
   Stepping,
@@ -1883,6 +1884,12 @@ public:
   bool solve_cw(double tol = sizeof(realnum) == sizeof(float) ? 1e-5 : 1e-8, int maxiters = 10000,
                 int L = 2, std::complex<double> *eigfreq = NULL, double eigtol = 1e-8,
                 int eigiters = 20);
+
+  // wh_fields.cpp:
+  bool solve_wh(double tol, int maxiters, std::complex<double> frequency, int L = 30,
+                int periods = 1, linear_solver solver = GMRES);
+  bool solve_wh(double tol = sizeof(realnum) == sizeof(float) ? 1e-5 : 1e-8, int maxiters = 10000,
+                int L = 10, int periods = 1, linear_solver solver = GMRES);
 
   // sources.cpp:
   double last_source_time();

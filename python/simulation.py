@@ -3944,6 +3944,12 @@ class Simulation:
         self._evaluate_dft_objects()
         return self.fields.solve_cw(tol, maxiters, L)
 
+    def solve_wh(self, tol=1e-8, maxiters=10000, L=10, periods=1, solver=mp.GMRES):
+        if self.fields is None:
+            raise RuntimeError("Fields must be initialized before using solve_wh")
+        self._evaluate_dft_objects()
+        return self.fields.solve_wh(tol, maxiters, L, periods, solver)
+
     def solve_eigfreq(
         self, tol=1e-7, maxiters=100, guessfreq=None, cwtol=None, cwmaxiters=10000, L=10
     ):
