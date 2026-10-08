@@ -162,10 +162,11 @@ static void array_to_fields_real(const realnum *x, fields &f) {
   f.update_eh(E_stuff, true);
   f.step_boundaries(E_stuff);
 
-  /* done in f.step before updating D:
+  // f.step redoes this before updating D, but the final write-back of the solution needs it:
+  // without it, B on chunk-boundary (non-owned) points and all of H keep stale values
   f.step_boundaries(B_stuff);
-  f.update_eh(H_stuff);
-  f.step_boundaries(H_stuff); */
+  f.update_eh(H_stuff, true);
+  f.step_boundaries(H_stuff);
 }
 
 
@@ -611,14 +612,16 @@ bool fields::solve_waveholtz_cw(double tol, int maxiters, complex<double> freque
 
   const int Nt = (int)std::ceil(T / dt - 1e-9); // round up => new dt <= old dt, so still stable
   const double dt_user = dt;
+
+
+
+  use_real_fields();
+  step(); // MEEP allocates PML auxiliary arrays (f_u, f_w, ...) lazily on the first step
   set_dt(T / Nt);
   if (fabs(Nt * dt - T) > 1e-12 * T)
     meep::abort("solve_waveholtz_cw: Nt*dt = %.15g != T = %.15g", Nt * dt, T);
   if (verbosity > 0 && dt != dt_user)
     master_printf("solve_waveholtz_cw: dt %.12g -> %.12g (%d steps per period)\n", dt_user, dt, Nt);
-
-  use_real_fields();
-  step(); // MEEP allocates PML auxiliary arrays (f_u, f_w, ...) lazily on the first step
   zero_fields();
   t = 0;
 
@@ -648,12 +651,8 @@ bool fields::solve_waveholtz_cw(double tol, int maxiters, complex<double> freque
       }
     }
 
-  realnum *d_wh_vector = new realnum[N_D];
-  realnum *b_wh_vector = new realnum[N_B];
-
   const size_t N = N_D + N_B;
   realnum *Pi0 = new realnum[N]();
-  realnum *xfgmres = new realnum[N](); // initial guess 0, overwritten with the solution
   realnum *xgmres = new realnum[N]();  // initial guess 0, overwritten with the solution
 	
 
@@ -681,6 +680,11 @@ bool fields::solve_waveholtz_cw(double tol, int maxiters, complex<double> freque
     master_printf("solve_waveholtz_cw: %d GMRES iters, true |r|/|b| = %.3e%s\n", r.iters, r.relres,
                   r.converged ? "" : "  -- CONVERGENCE FAILURE");
   set_dt(dt_user); // restore, so later time stepping uses the configured dt
+
+	
+	delete[] Pi0;
+	delete[] xgmres;
+
 
   return r.converged;
 }

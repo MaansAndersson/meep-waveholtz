@@ -24,6 +24,71 @@ static const double PI = 3.14159265358979323846;
 using namespace meep;
 
 // Should probably be templated?
+static void array_to_D(const complex<realnum> *x, fields &f) {
+  size_t ix = 0;
+  for (int i = 0; i < f.num_chunks; i++)
+    if (f.chunks[i]->is_mine()) FOR_COMPONENTS(c) {
+        if (is_D(c)) {
+          realnum *fr, *fi;
+#define COPY_TO_FIELD(fld)                                                                         \
+  if ((fr = f.chunks[i]->fld[0]) && (fi = f.chunks[i]->fld[1]))                                    \
+    LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {                                                 \
+      fr[idx] = real(x[ix]);                                                                       \
+      fi[idx] = imag(x[ix++]);                                                                     \
+    }
+          COPY_TO_FIELD(f[c]);
+          COPY_TO_FIELD(f_u[c]);
+          COPY_TO_FIELD(f_cond[c]);
+          COPY_TO_FIELD(f_bfast[c]);
+          component c2 = field_type_component(is_D(c) ? E_stuff : H_stuff, c);
+          COPY_TO_FIELD(f_w[c2]);
+          if (f.chunks[i]->f_w[c2][0]) COPY_TO_FIELD(f[c2]);
+#undef COPY_TO_FIELD
+        }
+      }
+
+  f.step_boundaries(D_stuff);
+  f.update_eh(E_stuff, true);
+  f.step_boundaries(E_stuff);
+
+  /* done in f.step before updating D: */
+  // f.step_boundaries(B_stuff);
+  // f.update_eh(H_stuff);
+  // f.step_boundaries(H_stuff);
+}
+
+static void array_to_B(const complex<realnum> *x, fields &f) {
+  size_t ix = 0;
+  for (int i = 0; i < f.num_chunks; i++)
+    if (f.chunks[i]->is_mine()) FOR_COMPONENTS(c) {
+        if (is_B(c)) {
+          realnum *fr, *fi;
+#define COPY_TO_FIELD(fld)                                                                         \
+  if ((fr = f.chunks[i]->fld[0]) && (fi = f.chunks[i]->fld[1]))                                    \
+    LOOP_OVER_VOL_OWNED(f.chunks[i]->gv, c, idx) {                                                 \
+      fr[idx] = real(x[ix]);                                                                       \
+      fi[idx] = imag(x[ix++]);                                                                     \
+    }
+          COPY_TO_FIELD(f[c]);
+          COPY_TO_FIELD(f_u[c]);
+          COPY_TO_FIELD(f_cond[c]);
+          COPY_TO_FIELD(f_bfast[c]);
+          component c2 = field_type_component(is_D(c) ? E_stuff : H_stuff, c);
+          COPY_TO_FIELD(f_w[c2]);
+          if (f.chunks[i]->f_w[c2][0]) COPY_TO_FIELD(f[c2]);
+#undef COPY_TO_FIELD
+        }
+      }
+
+  f.step_boundaries(D_stuff);
+  f.update_eh(E_stuff, true);
+  f.step_boundaries(E_stuff);
+
+  //* done in f.step before updating D:
+  // f.step_boundaries(B_stuff);
+  // f.update_eh(H_stuff);
+  // f.step_boundaries(H_stuff);
+}
 
 static void complex_fields_to_array(const fields &f, complex<realnum> *x) {
   size_t ix = 0;
@@ -458,11 +523,15 @@ void pi_single(const double omega, const double Tend, const size_t Nt, const int
   array_to_fields(wh_vector, f);
 }
 
-void pi_post(const double omega, const double Tend, const size_t Nt, fields &f, realnum *wh_cos,
-             realnum *wh_sin, size_t N) {
-	
-	f.remove_sources();
+void pi_post(fields &f, fields &f_complex, const double omega, const double Tend, const size_t Nt,
+             realnum *wh_cos, size_t N, size_t N_D, size_t N_B) {
+
+  realnum *wh_sin = new realnum[N];
+  f.remove_sources();
+
+  // How should we handle this?
   add_cw_source(f, "sin", omega, 1.);
+
   // waveholtz
   double Cfilt = 0.0;
   double Sfilt = 0.0;
@@ -498,6 +567,27 @@ void pi_post(const double omega, const double Tend, const size_t Nt, fields &f, 
   }
 
   f.zero_fields();
+
+  complex<realnum> *Dhat = new complex<realnum>[2 * N_D];
+  complex<realnum> *Bhat = new complex<realnum>[2 * N_B];
+
+  for (int i = 0; i < N_D; i++) {
+    Dhat[i] = std::complex(wh_cos[i], -wh_sin[i]);
+  }
+
+  double theta = f.dt * omega / 2;
+  double ct = std::cos(theta);
+  double st = std::sin(theta);
+  for (int i = 0; i < N_B; i++) {
+    Bhat[i] = std::complex(ct * wh_cos[i] + st * wh_sin[i], st * wh_cos[i] - ct * wh_sin[i]);
+  }
+
+  array_to_D(Dhat, f_complex);
+  array_to_B(Bhat, f_complex);
+
+  delete[] Dhat;
+  delete[] Bhat;
+  delete[] wh_sin;
 }
 
 void pi_steps_in_place(const double omega, const double Tend, const size_t Nt, const int N_iwh,
@@ -729,19 +819,20 @@ int main(int argc, char **argv) {
 
   // No-op preconditioner for fmgres
   // Nested GMRES solver (S-I)d = r;
-//  auto M = [&](const double *in, double *out) {
-//    for (size_t i = 0; i < N; i++) {
-//      out[i] = in[i];
-//    }
-//    meep::gmres_result sol3 = meep::gmres(N, A, in, out, 5, 1e-4, 5, false);
-//  };
-//
-//  const double wt0 = meep::wall_time();
-//  meep::gmres_result sol = meep::fgmres(N, A, M, Pi0, xfgmres, m, 1e-13, 100);
-//  const double wt1 = meep::wall_time();
-//  master_printf("GMRES %s after %d iterations, |r|/|b| = %.3e, %.3f s\n",
-//                sol.converged ? "converged" : "NOT converged", sol.iters, sol.relres, wt1 - wt0);
-//
+  //  auto M = [&](const double *in, double *out) {
+  //    for (size_t i = 0; i < N; i++) {
+  //      out[i] = in[i];
+  //    }
+  //    meep::gmres_result sol3 = meep::gmres(N, A, in, out, 5, 1e-4, 5, false);
+  //  };
+  //
+  //  const double wt0 = meep::wall_time();
+  //  meep::gmres_result sol = meep::fgmres(N, A, M, Pi0, xfgmres, m, 1e-13, 100);
+  //  const double wt1 = meep::wall_time();
+  //  master_printf("GMRES %s after %d iterations, |r|/|b| = %.3e, %.3f s\n",
+  //                sol.converged ? "converged" : "NOT converged", sol.iters, sol.relres, wt1 -
+  //                wt0);
+  //
   const double wt2 = meep::wall_time();
   meep::gmres_result sol2 = meep::gmres(N, A, Pi0, xgmres, m, 1e-13, 100);
   const double wt3 = meep::wall_time();
@@ -755,13 +846,13 @@ int main(int argc, char **argv) {
         eaux = std::max(eaux, (double)std::abs(xgmres[i] - xref[i]));
         continue;
       }
-      //e = std::max(e, (double)std::abs(xfgmres[i] - xref[i]));
+      // e = std::max(e, (double)std::abs(xfgmres[i] - xref[i]));
       e2 = std::max(e2, (double)std::abs(xgmres[i] - xref[i]));
       xmax = std::max(xmax, (double)std::abs(xref[i]));
     }
     xmax = max_to_all(xmax);
-    //master_printf("case %d pml %g FGMRES rel. max diff vs time-domain: %.3e\n", g_case, dpml,
-    //              max_to_all(e) / xmax);
+    // master_printf("case %d pml %g FGMRES rel. max diff vs time-domain: %.3e\n", g_case, dpml,
+    //               max_to_all(e) / xmax);
     master_printf("case %d pml %g GMRES  rel. max diff vs time-domain: %.3e\n", g_case, dpml,
                   max_to_all(e2) / xmax);
     master_printf("case %d pml %g PML auxiliary (static) diff: %.3e\n", g_case, dpml,
@@ -783,7 +874,7 @@ int main(int argc, char **argv) {
     double eD = 0, eB = 0, eD2 = 0, eB2 = 0;
     for (size_t i = 0; i < N; i++) {
       const double e = std::abs(xfgmres[i] - exact[i]);
-			const double e2 = std::abs(xgmres[i] - exact[i]);
+      const double e2 = std::abs(xgmres[i] - exact[i]);
       if (isD[i] != 0) {
         eD = std::max(eD, e);
         eD2 = std::max(eD2, e2);
@@ -793,8 +884,8 @@ int main(int argc, char **argv) {
         eB2 = std::max(eB2, e2);
       }
     }
-    master_printf("case %d FGMRES max error D: %.3e  B: %.3e\n", g_case, max_to_all(eD),
-                  max_to_all(eB));
+    // master_printf("case %d FGMRES max error D: %.3e  B: %.3e\n", g_case, max_to_all(eD),
+    //               max_to_all(eB));
     master_printf("case %d GMRES  max error D: %.3e  B: %.3e\n", g_case, max_to_all(eD2),
                   max_to_all(eB2));
 
@@ -818,33 +909,39 @@ int main(int argc, char **argv) {
   // The error checks above zero the fields; write the solution back first.
   array_to_fields(xgmres, f);
 
-	//realnum *wh_cos = new realnum[N];
-	realnum *wh_sin = new realnum[N];
+  // realnum *wh_cos = new realnum[N];
 
-	pi_post(omega, Tend, Nt, f, xgmres, wh_sin, N);
+  // realnum *wh_sin = new realnum[N];
+  fields f_post(&s);
+  pi_post(f, f_post, omega, Tend, Nt, xgmres, N, N_D, N_B);
 
-  fields f_complex(&s);
+  // fields f_complex(&s);
 
-  complex<realnum> *Dhat = new complex<realnum>[2 * N_D];
-  complex<realnum> *Bhat = new complex<realnum>[2 * N_B];
-  // f_complex
+  // complex<realnum> *Dhat = new complex<realnum>[2 * N_D];
+  // complex<realnum> *Bhat = new complex<realnum>[2 * N_B];
+  //// f_complex
 
-  for (int i = 0; i < N_D; i++) {
-    Dhat[i] = std::complex(xgmres[i], -wh_sin[i]);
-  }
+  // for (int i = 0; i < N_D; i++) {
+  //   Dhat[i] = std::complex(xgmres[i], -wh_sin[i]);
+  // }
 
-	double theta = f.dt * omega / 2;
-  for (int i = 0; i < N_B; i++) {
-    Bhat[i] = std::complex(std::cos(theta)*xgmres[i]+std::sin(theta)*wh_sin[i], std::sin(theta)*xgmres[i]-std::cos(theta)*wh_sin[i]);
-  }
+  // double theta = f.dt * omega / 2;
+  // double ct = std::cos(theta);
+  // double st = std::sin(theta);
+  // for (int i = 0; i < N_B; i++) {
+  //   Bhat[i] = std::complex(ct*xgmres[i]+st*wh_sin[i], st*xgmres[i]-ct*wh_sin[i]);
+  // }
+
+  // array_to_D(Dhat, f_complex);
+  // array_to_B(Bhat, f_complex);
 
   // solve_cw comparison, off while testing (dominates the 3D run time):
   /*
-	add_cw_source(f_complex,"sin", omega, 1.); // 0.5*omega/PI, 1.);
-	auto ok = f_complex.solve_cw(1e-6, 1000, 10);
+        add_cw_source(f_complex,"sin", omega, 1.); // 0.5*omega/PI, 1.);
+        auto ok = f_complex.solve_cw(1e-6, 1000, 10);
 
-	if (!ok)
-		meep::abort("BiCGStab did not converge!");
+        if (!ok)
+                meep::abort("BiCGStab did not converge!");
 
   h5file *dz_CW_file = f_complex.open_h5file("dz_CW", h5file::WRITE, 0, false);
   f_complex.output_hdf5(Dz, f_complex.v, dz_CW_file);
@@ -855,7 +952,7 @@ int main(int argc, char **argv) {
   delete dz_CW_file_i;
   */
 
-	array_to_fields(xgmres, f);
+  array_to_fields(xgmres, f);
   h5file *dz_file = f.open_h5file("dz", h5file::WRITE, 0, false);
   f.output_hdf5(Dz, f.v, dz_file);
   delete dz_file;
