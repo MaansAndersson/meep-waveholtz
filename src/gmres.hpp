@@ -44,8 +44,8 @@ typedef void (*gmres_op)(const realnum *x, realnum *y, void *data);
 
    For non-NULL nwork, returns 0 on success, 1 if the maximum number of iterations was reached, and
    -1 if a breakdown in convergence was detected. */
-ptrdiff_t gmres(const int m, const size_t n, realnum *x, gmres_op A, void *Adata,
-                const realnum *b, const double tol,
+ptrdiff_t gmres(const int m, const size_t n, realnum *x, gmres_op A, void *Adata, const realnum *b,
+                const double tol,
                 int *iters,    // input *iters = max iters, output = actual iters
                 realnum *work, // if you pass work=NULL, gmres returns nwork
                 const bool quiet);

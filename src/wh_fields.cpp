@@ -24,7 +24,7 @@ using namespace std;
 namespace meep {
 
 static void fields_sum_to_array_real(const fields &f, realnum *x, const double scale_D,
-                                const double scale_B) {
+                                     const double scale_B) {
   size_t ix = 0;
   for (int i = 0; i < f.num_chunks; i++)
     if (f.chunks[i]->is_mine()) FOR_COMPONENTS(c) {
@@ -90,8 +90,6 @@ static void array_to_fields_real(const realnum *x, fields &f) {
   f.update_eh(H_stuff, true);
   f.step_boundaries(H_stuff);
 }
-
-
 
 // One application of the WaveHoltz filter map Pi: starting from the fields in wh_vector (length
 // N), step the fields over [0, Tend] in Nt steps and overwrite wh_vector with the trapezoidal
@@ -165,8 +163,7 @@ bool fields::solve_wh(double tol, int maxiters, complex<double> frequency, int L
 
   const double freq = real(frequency);
   if (freq <= 0.0 || imag(frequency) != 0.0)
-    meep::abort("solve_wh requires a real positive frequency (got %g%+gi)", freq,
-                imag(frequency));
+    meep::abort("solve_wh requires a real positive frequency (got %g%+gi)", freq, imag(frequency));
   const double omega = 2 * pi * freq; // angular frequency of the harmonic response
   const double T = periods / freq;    // filter window
 

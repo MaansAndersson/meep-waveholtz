@@ -74,9 +74,8 @@ static void xpay(size_t n, realnum *x, double a, const realnum *y) {
 typedef realnum *prealnum; // grr, ISO C++ forbids new (double*)[...]
 
 /* GMRES(m) algorithm for the n-by-n problem Ax = b */
-ptrdiff_t gmres(const int m, const size_t n, realnum *x, gmres_op A, void *Adata,
-                const realnum *b, const double tol, int *iters, realnum *work,
-                const bool quiet) {
+ptrdiff_t gmres(const int m, const size_t n, realnum *x, gmres_op A, void *Adata, const realnum *b,
+                const double tol, int *iters, realnum *work, const bool quiet) {
   if (!work) return (m + 2) * n; // required workspace
 
   // Arnoldi basis V[0..m] and a scratch vector w
