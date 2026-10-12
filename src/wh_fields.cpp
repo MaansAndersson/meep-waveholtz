@@ -176,17 +176,21 @@ bool fields::solve_wh(double tol, int maxiters, complex<double> frequency, int L
     const double r = new_dt / dt;
     for (int i = 0; i < num_chunks; i++) {
       fields_chunk *fc = chunks[i];
+      // Chunks owned by other processes hold no field or structure data here, nothing reads
+      // their dt, and copying their structure_chunk is not safe (the copy constructor leaves
+      // the material arrays of a non-owned chunk uninitialized): skip them.
+      if (!fc->is_mine()) continue;
       fc->changing_structure(); // un-share the structure_chunk before modifying it
       fc->dt = new_dt;
       fc->Courant = fc->a * new_dt;
       structure_chunk *sc = fc->s;
-      if (sc->is_mine()) FOR_DIRECTIONS(d) {
-          if (!sc->sig[d]) continue;
-          for (int k = 0; k < sc->sigsize[d]; k++) {
-            sc->sig[d][k] *= r; // sig = 0.5*dt*prefac*s is linear in dt
-            sc->siginv[d][k] = 1 / (sc->kap[d][k] + sc->sig[d][k]);
-          }
+      FOR_DIRECTIONS(d) {
+        if (!sc->sig[d]) continue;
+        for (int k = 0; k < sc->sigsize[d]; k++) {
+          sc->sig[d][k] *= r; // sig = 0.5*dt*prefac*s is linear in dt
+          sc->siginv[d][k] = 1 / (sc->kap[d][k] + sc->sig[d][k]);
         }
+      }
       sc->dt = new_dt;
       sc->Courant = sc->a * new_dt;
       sc->condinv_stale = true;
