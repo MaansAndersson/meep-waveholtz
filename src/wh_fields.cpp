@@ -176,7 +176,9 @@ bool fields::solve_wh(double tol, int maxiters, complex<double> frequency, int L
     const double r = new_dt / dt;
     for (int i = 0; i < num_chunks; i++) {
       fields_chunk *fc = chunks[i];
-      fc->changing_structure(); // un-share the structure_chunk before modifying it
+      // Modify the structure_chunk in place rather than un-sharing it with changing_structure():
+      // the structure_chunk copy constructor under-allocates the PML arrays (sig/kap/siginv),
+      // and solve_wh restores dt with set_dt(dt_user) before returning.
       fc->dt = new_dt;
       fc->Courant = fc->a * new_dt;
       structure_chunk *sc = fc->s;
@@ -237,8 +239,16 @@ bool fields::solve_wh(double tol, int maxiters, complex<double> frequency, int L
 
   // Create the r.h.s. of the solver: b = Pi(0), with the sources on
   pi_single(omega, T, Nt, *this, b, N);
-  // the operator S = Pi - Pi(0) is source free
-  remove_sources();
+  // the operator S = Pi - Pi(0) is source free: detach the sources (rather than
+  // remove_sources(), which deletes them) and restore them after the solve
+  src_time *saved_sources = sources;
+  sources = NULL;
+  std::vector<src_vol> *saved_chunk_sources =
+      new std::vector<src_vol>[num_chunks * NUM_FIELD_TYPES];
+  for (int i = 0; i < num_chunks; i++)
+    FOR_FIELD_TYPES(ft) {
+      saved_chunk_sources[i * NUM_FIELD_TYPES + ft].swap(chunks[i]->sources[ft]);
+    }
   zero_fields();
 
   whop_data data;
@@ -249,6 +259,13 @@ bool fields::solve_wh(double tol, int maxiters, complex<double> frequency, int L
   data.Nt = Nt;
 
   int ierr = (int)solve(L, N, x, whop, &data, b, tol, &iters, work, verbosity == 0);
+
+  sources = saved_sources;
+  for (int i = 0; i < num_chunks; i++)
+    FOR_FIELD_TYPES(ft) {
+      chunks[i]->sources[ft].swap(saved_chunk_sources[i * NUM_FIELD_TYPES + ft]);
+    }
+  delete[] saved_chunk_sources;
 
   array_to_fields_real(x, *this);
   if (verbosity > 0) {
